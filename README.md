@@ -6,6 +6,8 @@ A user-friendly desktop application to download and preserve your Snapchat memor
 
 This tool helps you download all your Snapchat memories using the `memories_history.json` file from your Snapchat data export. It preserves important metadata like creation dates, timestamps, and GPS coordinates by embedding them directly into the downloaded media files.
 
+![Application Interface](images/application_screen.png)
+
 ## ✨ Features
 
 - **Easy-to-use GUI** - Simple desktop interface, no command line needed
@@ -68,19 +70,28 @@ python download_snapchat_memories_gui.py
 
 1. **Launch the Application**
    - Run the `.exe` file or Python script
+   - You'll see the main application window:
+
+   ![Application Main Screen](images/application_screen.png)
 
 2. **Select JSON File**
    - Click "Browse..." next to "JSON File"
-   - Navigate to and select your `memories_history.json` file
+   - Navigate to and select your `memories_history.json` file from the extracted Snapchat data folder
 
 3. **Choose Output Directory**
    - Click "Browse..." next to "Output Directory"
    - Select where you want to save your memories (default: `downloads` folder)
 
+   ![Select Output Directory](images/Output_directory.png)
+
+   ![Application with Paths Selected](images/application_screen_with_paths.png)
+
 4. **Start Download**
    - Click "Start Download" button
    - Monitor progress in the log window
    - Wait for completion (you can click "Stop" to pause if needed)
+
+   ![Download in Progress](images/application_screen_with_Download.png)
 
 5. **Access Your Memories**
    - Once complete, find your downloaded memories in the output directory
