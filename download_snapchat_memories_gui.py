@@ -27,6 +27,13 @@ try:
 except ImportError:
     HAS_MUTAGEN = False
 
+# For video conversion (HEVC to H.264)
+try:
+    import av
+    HAS_PYAV = True
+except ImportError:
+    HAS_PYAV = False
+
 # ==================== Core Functions (from original script) ====================
 
 def parse_date(date_str):
@@ -108,27 +115,63 @@ def set_video_metadata(file_path, date_obj, latitude, longitude):
     if not HAS_MUTAGEN:
         return False
     
+    # Create backup before attempting to modify
+    backup_path = f"{file_path}.backup"
+    
     try:
-        video = MP4(file_path)
+        # Validate it's a proper MP4 file first
+        with open(file_path, 'rb') as f:
+            header = f.read(12)
+            # Check for valid MP4/MOV signatures (ftyp box)
+            if len(header) < 8 or header[4:8] not in [b'ftyp', b'mdat', b'moov']:
+                return False
         
-        # Set creation date in ISO format
-        creation_time = date_obj.strftime("%Y-%m-%dT%H:%M:%SZ")
-        video["\xa9day"] = creation_time  # Date tag
+        # Create backup
+        shutil.copy2(file_path, backup_path)
         
-        # Add location if available (using custom tags)
-        if latitude is not None and longitude is not None:
-            # Store as ISO 6709 format string
-            location_str = f"{latitude:+.6f}{longitude:+.6f}/"
-            video["----:com.apple.quicktime:location-ISO6709"] = location_str.encode('utf-8')
+        try:
+            video = MP4(file_path)
             
-            # Also store individual coordinates
-            video["----:com.apple.quicktime:latitude"] = str(latitude).encode('utf-8')
-            video["----:com.apple.quicktime:longitude"] = str(longitude).encode('utf-8')
-        
-        video.save()
-        return True
+            # Set creation date in ISO format
+            creation_time = date_obj.strftime("%Y-%m-%dT%H:%M:%SZ")
+            video["\xa9day"] = creation_time  # Date tag
+            
+            # Add location if available (using custom tags)
+            if latitude is not None and longitude is not None:
+                # Store as ISO 6709 format string
+                location_str = f"{latitude:+.6f}{longitude:+.6f}/"
+                video["----:com.apple.quicktime:location-ISO6709"] = location_str.encode('utf-8')
+                
+                # Also store individual coordinates
+                video["----:com.apple.quicktime:latitude"] = str(latitude).encode('utf-8')
+                video["----:com.apple.quicktime:longitude"] = str(longitude).encode('utf-8')
+            
+            video.save()
+            
+            # Verify the file is still valid after save
+            with open(file_path, 'rb') as f:
+                verify_header = f.read(12)
+                if len(verify_header) < 8 or verify_header[4:8] not in [b'ftyp', b'mdat', b'moov']:
+                    # Restore from backup if corrupted
+                    shutil.copy2(backup_path, file_path)
+                    os.remove(backup_path)
+                    return False
+            
+            # Success - remove backup
+            os.remove(backup_path)
+            return True
+            
+        except Exception as e:
+            # Restore from backup on any error
+            if os.path.exists(backup_path):
+                shutil.copy2(backup_path, file_path)
+                os.remove(backup_path)
+            return False
         
     except Exception:
+        # Clean up backup if it exists
+        if os.path.exists(backup_path):
+            os.remove(backup_path)
         return False
 
 def set_file_timestamps(file_path, date_obj):
@@ -140,6 +183,76 @@ def set_file_timestamps(file_path, date_obj):
     except Exception:
         pass
 
+def convert_hevc_to_h264(input_path, output_path=None):
+    """Convert any video to H.264 for better compatibility using PyAV."""
+    if not HAS_PYAV:
+        return False, "PyAV not installed"
+    
+    if output_path is None:
+        base, ext = os.path.splitext(input_path)
+        output_path = f"{base}_temp{ext}"
+    
+    try:
+        # Open input video
+        input_container = av.open(input_path)
+        input_video_stream = input_container.streams.video[0]
+        
+        # Check codec - convert any non-H.264 video
+        codec_name = input_video_stream.codec_context.name
+        if codec_name in ['h264', 'avc']:
+            input_container.close()
+            return False, f"Already H.264 (codec: {codec_name})"
+        
+        # Create output container
+        output_container = av.open(output_path, 'w')
+        
+        # Add video stream with H.264 codec
+        output_video_stream = output_container.add_stream('h264', rate=input_video_stream.average_rate)
+        output_video_stream.width = input_video_stream.width
+        output_video_stream.height = input_video_stream.height
+        output_video_stream.pix_fmt = 'yuv420p'
+        output_video_stream.bit_rate = input_video_stream.bit_rate or 2000000
+        
+        # Copy audio stream if exists
+        audio_stream = None
+        output_audio_stream = None
+        if input_container.streams.audio:
+            audio_stream = input_container.streams.audio[0]
+            # Create audio stream with correct parameters from the start
+            output_audio_stream = output_container.add_stream('aac', rate=audio_stream.rate)
+            # Set layout which automatically sets channels (don't set channels directly)
+            if hasattr(audio_stream, 'layout') and audio_stream.layout:
+                output_audio_stream.layout = audio_stream.layout
+        
+        # Process frames
+        for packet in input_container.demux():
+            if packet.stream.type == 'video':
+                for frame in packet.decode():
+                    # Encode frame to H.264
+                    for out_packet in output_video_stream.encode(frame):
+                        output_container.mux(out_packet)
+            elif packet.stream.type == 'audio' and output_audio_stream:
+                for frame in packet.decode():
+                    # Re-encode audio
+                    for out_packet in output_audio_stream.encode(frame):
+                        output_container.mux(out_packet)
+        
+        # Flush streams
+        for packet in output_video_stream.encode():
+            output_container.mux(packet)
+        if output_audio_stream:
+            for packet in output_audio_stream.encode():
+                output_container.mux(packet)
+        
+        # Close containers
+        input_container.close()
+        output_container.close()
+        
+        return True, output_path
+        
+    except Exception as e:
+        return False, str(e)
+
 def download_media(url, output_path):
     """Download media file from URL."""
     try:
@@ -150,17 +263,56 @@ def download_media(url, output_path):
             for chunk in response.iter_content(chunk_size=8192):
                 f.write(chunk)
         
+        # Validate the downloaded file
         with open(output_path, 'rb') as f:
-            magic = f.read(12)
-            
-        is_html = magic[:5].lower() == b'<!doc' or magic[:5].lower() == b'<html'
+            magic = f.read(32)  # Read more bytes for better validation
+        
+        # Check if it's HTML (error page)
+        is_html = (magic[:5].lower() == b'<!doc' or 
+                   magic[:5].lower() == b'<html' or
+                   b'<html' in magic.lower() or
+                   b'<!doctype' in magic.lower())
         
         if is_html:
             os.remove(output_path)
             return False
         
+        # Validate file type based on magic numbers
+        if len(magic) < 4:
+            os.remove(output_path)
+            return False
+        
+        # Check for valid image formats
+        is_valid_jpg = magic[:2] == b'\xff\xd8' or magic[:3] == b'\xff\xd8\xff'
+        is_valid_png = magic[:8] == b'\x89PNG\r\n\x1a\n'
+        
+        # Check for valid video formats (MP4, MOV, M4V)
+        is_valid_mp4 = (len(magic) >= 12 and 
+                       (magic[4:8] == b'ftyp' or  # Standard MP4
+                        magic[4:8] == b'mdat' or  # Media data
+                        magic[4:8] == b'moov' or  # Movie atom
+                        magic[4:8] == b'wide'))   # Wide atom
+        
+        # If the file doesn't match expected formats, it might be corrupted
+        if not (is_valid_jpg or is_valid_png or is_valid_mp4):
+            # For videos, check alternate positions
+            if len(magic) >= 16:
+                is_valid_mp4 = magic[8:12] == b'ftyp' or magic[12:16] == b'ftyp'
+        
+        # Final validation - check file size
+        file_size = os.path.getsize(output_path)
+        if file_size < 100:  # Files should be at least 100 bytes
+            os.remove(output_path)
+            return False
+        
         return True
     except Exception:
+        # Clean up file on error
+        if os.path.exists(output_path):
+            try:
+                os.remove(output_path)
+            except:
+                pass
         return False
 
 def get_file_extension(media_type):
@@ -185,6 +337,7 @@ class SnapchatDownloaderGUI:
         # Variables
         self.json_path = tk.StringVar()
         self.output_path = tk.StringVar(value="downloads")
+        self.convert_hevc = tk.BooleanVar(value=True)
         self.is_downloading = False
         self.stop_download = False
         
@@ -320,7 +473,24 @@ class SnapchatDownloaderGUI:
         output_info = ttk.Label(input_card, 
                                text="Choose where to save your downloaded memories", 
                                style="Info.TLabel")
-        output_info.pack(anchor=tk.W, pady=(0, 20))
+        output_info.pack(anchor=tk.W, pady=(0, 15))
+        
+        # Conversion option
+        conversion_frame = ttk.Frame(input_card, style="Card.TFrame")
+        conversion_frame.pack(fill=tk.X, pady=(0, 20))
+        
+        self.convert_checkbox = ttk.Checkbutton(
+            conversion_frame, 
+            text="Convert HEVC videos to H.264 for better compatibility",
+            variable=self.convert_hevc,
+            style="Info.TLabel"
+        )
+        self.convert_checkbox.pack(anchor=tk.W)
+        
+        conversion_info = ttk.Label(input_card,
+                                   text="Recommended: Creates H.264 versions that play in Windows Media Player and browsers",
+                                   style="Info.TLabel")
+        conversion_info.pack(anchor=tk.W, pady=(0, 20))
         
         # Buttons
         button_frame = ttk.Frame(input_card, style="Card.TFrame")
@@ -516,8 +686,35 @@ class SnapchatDownloaderGUI:
                             set_image_exif_metadata(str(file_path), date_obj, latitude, longitude)
                             self.log("  ✓ Set EXIF metadata")
                     elif media_type == "Video":
-                        if set_video_metadata(str(file_path), date_obj, latitude, longitude):
-                            self.log("  ✓ Set video metadata")
+                        # Convert all videos to H.264 by default
+                        if HAS_PYAV:
+                            self.log("  🔄 Converting to H.264...")
+                            success, result = convert_hevc_to_h264(str(file_path))
+                            if success:
+                                self.log(f"  ✓ Converted to H.264")
+                                # Replace original with converted file
+                                os.remove(str(file_path))
+                                os.rename(result, str(file_path))
+                                # Set timestamps on the file
+                                set_file_timestamps(str(file_path), date_obj)
+                            else:
+                                if "Already H.264" in result:
+                                    self.log(f"  ℹ {result} - no conversion needed")
+                                else:
+                                    self.log(f"  ⚠ Conversion failed: {result}")
+                        else:
+                            self.log("  ⚠ PyAV not installed - keeping original video")
+                            self.log("  ℹ Install PyAV for automatic conversion: pip install av")
+                        
+                        # Try to set video metadata, but don't fail if it doesn't work
+                        if HAS_MUTAGEN:
+                            metadata_result = set_video_metadata(str(file_path), date_obj, latitude, longitude)
+                            if metadata_result:
+                                self.log("  ✓ Set video metadata")
+                            else:
+                                self.log("  ℹ Video downloaded (metadata setting skipped to preserve file integrity)")
+                        else:
+                            self.log("  ℹ Video downloaded (install mutagen for metadata support)")
                     
                     # Set file timestamps
                     set_file_timestamps(str(file_path), date_obj)

@@ -2,3 +2,4 @@ requests
 pillow
 piexif
 mutagen
+av
