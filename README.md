@@ -15,6 +15,7 @@ This tool helps you download all your Snapchat memories using the `memories_hist
 - **Metadata Preservation** - Maintains original dates and GPS locations
 - **EXIF Support** - Embeds metadata into image EXIF data (for JPEG files)
 - **Video Metadata** - Adds creation date and location to video files
+- **Video Conversion** - Automatic H.264 conversion for better Windows compatibility (VLC recommended)
 - **File Timestamps** - Sets file modification dates to match when memories were created
 - **Progress Tracking** - Real-time download progress and detailed logging
 - **Stop/Resume Capable** - Pause downloads at any time
@@ -38,6 +39,22 @@ pip install -r requirements.txt
 # Run the application
 python download_snapchat_memories_gui.py
 ```
+
+### Recommended: Install VLC for Video Conversion
+
+For optimal video compatibility on Windows, it's **highly recommended** to install VLC Media Player:
+
+1. **Download VLC** from the official website: https://www.videolan.org/
+2. **Install VLC** using the default installation options
+3. The application will automatically detect VLC and use it for converting videos to H.264 format
+
+**Why VLC?**
+- Ensures videos play smoothly on Windows Media Player and Photos app
+- Converts HEVC/H.265 videos to widely compatible H.264 format
+- No additional configuration needed - works automatically once installed
+- Free and open-source
+
+**Note:** The application will still work without VLC, but some videos may not be converted and could have playback issues on certain devices.
 
 ## 📥 How to Get Your Snapchat Data
 
@@ -120,6 +137,13 @@ The application uses the following Python libraries:
 - `mutagen` - Video metadata handling
 - `tkinter` - GUI framework (included with Python)
 
+### Optional but Recommended
+
+- **VLC Media Player** - For automatic video conversion to H.264 format
+  - Download from: https://www.videolan.org/
+  - Provides best compatibility for videos on Windows devices
+  - Not required but highly recommended for optimal results
+
 ## ⚙️ Building the Executable
 
 To compile the Python script into an `.exe` file yourself:
@@ -149,6 +173,12 @@ The executable will be created in the `dist` folder.
 - EXIF data only works with JPEG images
 - Video metadata requires compatible players (VLC, Windows Media Player)
 - Some apps may strip metadata when importing
+
+### Videos won't play on Windows
+- Install VLC Media Player from https://www.videolan.org/
+- Enable the "Convert videos to H.264" option in the app
+- Re-download the affected videos
+- VLC automatically converts HEVC videos to compatible H.264 format
 
 ### Windows SmartScreen Warning
 - The `.exe` is not code-signed, so Windows may show a warning

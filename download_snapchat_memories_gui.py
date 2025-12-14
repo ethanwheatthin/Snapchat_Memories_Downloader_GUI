@@ -11,6 +11,7 @@ import time
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import logging
+import zipfile
 
 # For setting file timestamps
 try:
@@ -568,6 +569,53 @@ def convert_hevc_to_h264(input_path, output_path=None, max_attempts=3, failed_di
     logging.error(f"All conversion attempts failed for {input_path}")
     return False, f"Failed after {max_attempts} PyAV attempts and VLC fallback"
 
+def extract_media_from_zip(zip_path, output_path):
+    """Extract media file from ZIP archive."""
+    temp_dir = None
+    try:
+        logging.info(f"Extracting media from ZIP: {zip_path}")
+        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+            # Get list of files in the ZIP
+            file_list = zip_ref.namelist()
+            
+            # Filter for media files (images and videos)
+            media_extensions = ('.jpg', '.jpeg', '.png', '.mp4', '.mov', '.m4v', '.heic')
+            media_files = [f for f in file_list if f.lower().endswith(media_extensions)]
+            
+            if not media_files:
+                logging.warning(f"No media files found in ZIP archive")
+                return False
+            
+            # Extract the first media file found
+            media_file = media_files[0]
+            logging.info(f"Extracting: {media_file}")
+            
+            # Extract to temporary location
+            temp_dir = Path(output_path).parent / "temp_extract"
+            temp_dir.mkdir(exist_ok=True)
+            
+            extracted_path = zip_ref.extract(media_file, temp_dir)
+            
+            # Move extracted file to desired output path
+            shutil.move(extracted_path, output_path)
+            
+            logging.info(f"Successfully extracted media to: {output_path}")
+            return True
+            
+    except zipfile.BadZipFile as e:
+        logging.warning(f"Invalid ZIP file: {zip_path} - {e}")
+        return False
+    except Exception as e:
+        logging.warning(f"Error extracting ZIP: {e}")
+        return False
+    finally:
+        # Always clean up temp directory if it exists
+        if temp_dir and temp_dir.exists():
+            try:
+                shutil.rmtree(temp_dir)
+            except Exception as cleanup_error:
+                logging.debug(f"Could not clean up temp directory: {cleanup_error}")
+
 def download_media(url, output_path):
     """Download media file from URL."""
     try:
@@ -608,11 +656,48 @@ def download_media(url, output_path):
                         magic[4:8] == b'moov' or  # Movie atom
                         magic[4:8] == b'wide'))   # Wide atom
         
+        # Check for ZIP file (Snapchat sometimes serves media as ZIP)
+        is_valid_zip = magic[:4] == b'PK\x03\x04'
+        
         # If the file doesn't match expected formats, it might be corrupted
-        if not (is_valid_jpg or is_valid_png or is_valid_mp4):
+        if not (is_valid_jpg or is_valid_png or is_valid_mp4 or is_valid_zip):
             # For videos, check alternate positions
             if len(magic) >= 16:
                 is_valid_mp4 = magic[8:12] == b'ftyp' or magic[12:16] == b'ftyp'
+            
+            if not is_valid_mp4:
+                # Log the magic number for debugging
+                magic_hex = magic[:8].hex()
+                logging.warning(f"Downloaded file has unexpected format (magic: {magic_hex})")
+        
+        # If it's a ZIP file, extract the media from it
+        if is_valid_zip:
+            logging.info("Downloaded file is a ZIP archive, extracting media...")
+            zip_path = output_path + ".zip"
+            
+            try:
+                os.rename(output_path, zip_path)
+                
+                if extract_media_from_zip(zip_path, output_path):
+                    # Clean up the ZIP file after successful extraction
+                    try:
+                        os.remove(zip_path)
+                        logging.info("Successfully extracted media from ZIP")
+                    except Exception as cleanup_error:
+                        logging.warning(f"Could not remove ZIP file: {cleanup_error}")
+                else:
+                    # Restore ZIP file if extraction failed - keep it for manual inspection
+                    try:
+                        if os.path.exists(zip_path):
+                            os.rename(zip_path, output_path)
+                        logging.warning("Failed to extract media from ZIP - keeping original ZIP file")
+                    except Exception as restore_error:
+                        logging.warning(f"Could not restore ZIP file: {restore_error}")
+                    # Don't return False - treat as partial success (file was downloaded)
+                    
+            except Exception as zip_error:
+                logging.warning(f"Error handling ZIP file: {zip_error} - keeping as-is")
+                # Continue anyway - file was downloaded even if ZIP handling failed
         
         # Final validation - check file size
         file_size = os.path.getsize(output_path)
@@ -662,10 +747,14 @@ def validate_downloaded_file(file_path):
              magic[4:8] == b'moov' or  # Movie atom
              magic[4:8] == b'wide')    # Wide atom
         )
+        
+        # Check for ZIP file (some Snapchat exports use ZIP)
+        is_valid_zip = magic[:4] == b'PK\x03\x04'
 
         # If the file doesn't match expected formats, it might be corrupted
-        if not (is_valid_jpg or is_valid_png or is_valid_mp4):
-            logging.error("File format is not recognized or is corrupted.")
+        if not (is_valid_jpg or is_valid_png or is_valid_mp4 or is_valid_zip):
+            magic_hex = magic[:8].hex()
+            logging.error(f"File format is not recognized or is corrupted (magic: {magic_hex}).")
             return False
 
         logging.info("File validation successful.")
