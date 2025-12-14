@@ -10,6 +10,7 @@ import threading
 import time
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
+import logging
 
 # For setting file timestamps
 try:
@@ -33,6 +34,23 @@ try:
     HAS_PYAV = True
 except ImportError:
     HAS_PYAV = False
+
+# For VLC-based video conversion
+try:
+    import vlc
+    HAS_VLC = True
+except (ImportError, FileNotFoundError, OSError):
+    HAS_VLC = False
+
+# Configure logging
+logging.basicConfig(
+    level=logging.DEBUG,  # Set to DEBUG for verbose logging
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    handlers=[
+        logging.FileHandler("debug.log"),  # Log to a file
+        logging.StreamHandler()  # Log to console
+    ]
+)
 
 # ==================== Core Functions (from original script) ====================
 
@@ -110,6 +128,222 @@ def check_ffmpeg():
     """Check if ffmpeg is available on the system."""
     return shutil.which('ffmpeg') is not None
 
+def check_vlc():
+    """Check if VLC Python bindings are available."""
+    return HAS_VLC
+
+def find_vlc_executable():
+    """Find VLC executable on the system."""
+    # Common VLC installation paths on Windows
+    vlc_paths = [
+        r"C:\Program Files\VideoLAN\VLC\vlc.exe",
+        r"C:\Program Files (x86)\VideoLAN\VLC\vlc.exe",
+    ]
+    
+    # Check if VLC is in PATH
+    vlc_in_path = shutil.which('vlc')
+    if vlc_in_path:
+        return vlc_in_path
+    
+    # Check common installation paths
+    for path in vlc_paths:
+        if os.path.exists(path):
+            return path
+    
+    return None
+
+def convert_with_vlc(input_path, output_path=None):
+    """Convert video using VLC - tries Python bindings first, then subprocess."""
+    if output_path is None:
+        base, ext = os.path.splitext(input_path)
+        output_path = f"{base}_converted{ext}"
+    
+    # Try Python VLC bindings first if available
+    if HAS_VLC:
+        try:
+            return convert_with_vlc_python(input_path, output_path)
+        except Exception as e:
+            logging.warning(f"python-vlc failed: {e}. Trying subprocess method...")
+    
+    # Fall back to subprocess method
+    return convert_with_vlc_subprocess(input_path, output_path)
+
+def convert_with_vlc_python(input_path, output_path):
+    """Convert video using VLC Python bindings."""
+    try:
+        logging.info(f"Converting with VLC (Python bindings): {input_path}")
+        
+        # Create VLC instance
+        instance = vlc.Instance('--no-xlib')
+        
+        # Create media player
+        player = instance.media_player_new()
+        media = instance.media_new(input_path)
+        
+        # Set up transcoding options matching VLC GUI: Video - H.264 + MP3 (MP4)
+        transcode_options = (
+            f"#transcode{{"
+            f"vcodec=h264,"
+            f"vb=2000,"  # Video bitrate in kb/s
+            f"venc=x264{{"
+                f"preset=medium,"
+                f"profile=main"
+            f"}},"
+            f"acodec=mp3,"
+            f"ab=192,"  # Audio bitrate in kb/s
+            f"channels=2,"
+            f"samplerate=44100"
+            f"}}:"
+            f"standard{{"
+                f"access=file,"
+                f"mux=mp4,"
+                f"dst={output_path}"
+            f"}}"
+        )
+        
+        # Add sout option to media
+        media.add_option(f":sout={transcode_options}")
+        media.add_option(":sout-keep")
+        
+        player.set_media(media)
+        
+        # Start playback (which triggers conversion)
+        player.play()
+        
+        # Wait for conversion to complete
+        import time
+        timeout = 300  # 5 minutes
+        start_time = time.time()
+        
+        while time.time() - start_time < timeout:
+            state = player.get_state()
+            
+            # Check if finished or error
+            if state == vlc.State.Ended:
+                logging.info("VLC conversion completed")
+                break
+            elif state == vlc.State.Error:
+                logging.error("VLC conversion encountered an error")
+                player.stop()
+                return False, "VLC conversion error"
+            elif state == vlc.State.Stopped:
+                # Check if output file exists and has content
+                if os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
+                    logging.info("VLC conversion stopped - checking output")
+                    break
+                else:
+                    logging.error("VLC conversion stopped prematurely")
+                    return False, "VLC conversion stopped"
+            
+            time.sleep(0.5)
+        else:
+            # Timeout reached
+            logging.error("VLC conversion timed out")
+            player.stop()
+            if os.path.exists(output_path):
+                os.remove(output_path)
+            return False, "VLC conversion timed out"
+        
+        # Stop player and release resources
+        player.stop()
+        player.release()
+        media.release()
+        
+        # Verify output file
+        if os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
+            logging.info(f"VLC conversion successful: {output_path}")
+            return True, output_path
+        else:
+            logging.error("VLC conversion failed - output file not created or too small")
+            if os.path.exists(output_path):
+                os.remove(output_path)
+            return False, "VLC conversion failed"
+            
+    except Exception as e:
+        logging.error(f"VLC Python conversion error: {e}", exc_info=True)
+        if os.path.exists(output_path):
+            try:
+                os.remove(output_path)
+            except:
+                pass
+        raise
+
+def convert_with_vlc_subprocess(input_path, output_path):
+    """Convert video using VLC command-line interface via subprocess."""
+    vlc_path = find_vlc_executable()
+    if not vlc_path:
+        logging.error("VLC executable not found on system")
+        return False, "VLC not installed"
+    
+    try:
+        logging.info(f"Converting with VLC (subprocess): {input_path}")
+        
+        # VLC command-line conversion
+        # This matches the VLC GUI profile: Video - H.264 + MP3 (MP4)
+        cmd = [
+            vlc_path,
+            "-I", "dummy",  # No interface
+            "--no-repeat",
+            "--no-loop",
+            input_path,
+            "--sout", (
+                f"#transcode{{"
+                f"vcodec=h264,"
+                f"venc=x264{{"
+                    f"preset=medium,"
+                    f"profile=main"
+                f"}},"
+                f"acodec=mp3,"
+                f"ab=192,"
+                f"channels=2,"
+                f"samplerate=44100"
+                f"}}:"
+                f"standard{{"
+                    f"access=file,"
+                    f"mux=mp4,"
+                    f"dst={output_path}"
+                f"}}"
+            ),
+            "vlc://quit"
+        ]
+        
+        logging.debug(f"VLC command: {' '.join(cmd)}")
+        
+        # Run VLC conversion
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=300  # 5 minute timeout
+        )
+        
+        # Check if output file was created
+        if os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
+            logging.info(f"VLC subprocess conversion successful: {output_path}")
+            return True, output_path
+        else:
+            logging.error(f"VLC subprocess conversion failed - output file not created or too small")
+            if os.path.exists(output_path):
+                os.remove(output_path)
+            return False, "VLC subprocess conversion failed"
+            
+    except subprocess.TimeoutExpired:
+        logging.error("VLC subprocess conversion timed out")
+        if os.path.exists(output_path):
+            try:
+                os.remove(output_path)
+            except:
+                pass
+        return False, "VLC conversion timed out"
+    except Exception as e:
+        logging.error(f"VLC subprocess conversion error: {e}", exc_info=True)
+        if os.path.exists(output_path):
+            try:
+                os.remove(output_path)
+            except:
+                pass
+        return False, str(e)
+
 def set_video_metadata(file_path, date_obj, latitude, longitude):
     """Set metadata for video files using mutagen (no ffmpeg required)."""
     if not HAS_MUTAGEN:
@@ -183,75 +417,156 @@ def set_file_timestamps(file_path, date_obj):
     except Exception:
         pass
 
-def convert_hevc_to_h264(input_path, output_path=None):
-    """Convert any video to H.264 for better compatibility using PyAV."""
+def convert_hevc_to_h264(input_path, output_path=None, max_attempts=3, failed_dir_path="downloads/failed_conversions"):
+    """Convert any video to H.264 for better compatibility using PyAV, with VLC fallback."""
     if not HAS_PYAV:
-        return False, "PyAV not installed"
-    
+        logging.warning("PyAV not installed. Attempting VLC fallback...")
+        # Try VLC as fallback
+        return convert_with_vlc(input_path, output_path)
+
     if output_path is None:
         base, ext = os.path.splitext(input_path)
         output_path = f"{base}_temp{ext}"
+
+    attempt = 0
+    while attempt < max_attempts:
+        attempt += 1
+        input_container = None
+        output_container = None
+        try:
+            logging.info(f"Attempt {attempt}: Opening input video: {input_path}")
+            input_container = av.open(input_path)
+            input_video_stream = input_container.streams.video[0]
+
+            # Always convert to H.264 regardless of the input codec
+            logging.info(f"Attempt {attempt}: Creating output container: {output_path}")
+            output_container = av.open(output_path, 'w')
+
+            # Add video stream with H.264 codec
+            output_video_stream = output_container.add_stream('h264', rate=input_video_stream.average_rate)
+            output_video_stream.width = input_video_stream.width
+            output_video_stream.height = input_video_stream.height
+            output_video_stream.pix_fmt = 'yuv420p'
+            output_video_stream.bit_rate = input_video_stream.bit_rate or 2000000
+
+            # Copy audio stream if exists
+            audio_stream = None
+            output_audio_stream = None
+            if input_container.streams.audio:
+                audio_stream = input_container.streams.audio[0]
+                output_audio_stream = output_container.add_stream('aac', rate=audio_stream.rate)
+                if hasattr(audio_stream, 'layout') and audio_stream.layout:
+                    output_audio_stream.layout = audio_stream.layout
+
+            logging.info(f"Attempt {attempt}: Processing frames...")
+            for packet in input_container.demux():
+                if packet.stream.type == 'video':
+                    for frame in packet.decode():
+                        for out_packet in output_video_stream.encode(frame):
+                            output_container.mux(out_packet)
+                elif packet.stream.type == 'audio' and output_audio_stream:
+                    for frame in packet.decode():
+                        for out_packet in output_audio_stream.encode(frame):
+                            output_container.mux(out_packet)
+
+            logging.info(f"Attempt {attempt}: Flushing streams...")
+            for packet in output_video_stream.encode():
+                output_container.mux(packet)
+            if output_audio_stream:
+                for packet in output_audio_stream.encode():
+                    output_container.mux(packet)
+
+            logging.info(f"Attempt {attempt}: Closing containers...")
+            # Explicitly close containers before file operations
+            if input_container:
+                input_container.close()
+                input_container = None
+            if output_container:
+                output_container.close()
+                output_container = None
+
+            logging.info(f"Conversion to H.264 successful on attempt {attempt}: {output_path}")
+            return True, output_path
+
+        except Exception as e:
+            logging.error(f"Attempt {attempt}: Error during conversion: {e}", exc_info=True)
+            # Ensure containers are closed
+            try:
+                if input_container:
+                    input_container.close()
+            except:
+                pass
+            try:
+                if output_container:
+                    output_container.close()
+            except:
+                pass
+            
+            # Small delay to ensure file handles are released
+            import time
+            time.sleep(0.5)
+            
+            if os.path.exists(output_path):
+                try:
+                    os.remove(output_path)
+                    logging.info(f"Attempt {attempt}: Removed partial output: {output_path}")
+                except Exception as cleanup_error:
+                    logging.error(f"Attempt {attempt}: Failed to remove partial output {output_path}: {cleanup_error}", exc_info=True)
+
+        logging.warning(f"Attempt {attempt} failed. Retrying...")
+
+    # PyAV failed all attempts, try VLC as fallback
+    logging.info("All PyAV attempts failed. Trying VLC fallback...")
+    
+    # Add delay to ensure file handles are released
+    import time
+    time.sleep(1)
+    
+    vlc_success, vlc_result = convert_with_vlc(input_path, output_path)
+    
+    if vlc_success:
+        logging.info(f"VLC fallback conversion successful: {vlc_result}")
+        return True, vlc_result
+    
+    # Both PyAV and VLC failed - move to failed_conversions folder
+    logging.error("Both PyAV and VLC conversion methods failed")
+    
+    # Ensure delay before file operations
+    time.sleep(1)
+    
+    failed_dir = Path(failed_dir_path)
+    failed_dir.mkdir(parents=True, exist_ok=True)
+    failed_path = failed_dir / Path(input_path).name
+    
+    # Save error log with the failed file
+    error_log_path = failed_dir / f"{Path(input_path).stem}_error.txt"
+    try:
+        with open(error_log_path, 'w') as f:
+            f.write(f"Failed conversion: {input_path}\n")
+            f.write(f"PyAV result: Failed after {max_attempts} attempts\n")
+            f.write(f"VLC result: {vlc_result}\n")
+            f.write(f"Timestamp: {datetime.now().isoformat()}\n")
+        logging.info(f"Error log saved: {error_log_path}")
+    except Exception as log_error:
+        logging.error(f"Failed to save error log: {log_error}")
     
     try:
-        # Open input video
-        input_container = av.open(input_path)
-        input_video_stream = input_container.streams.video[0]
+        # Use copy instead of move to avoid file locking issues
+        shutil.copy2(input_path, failed_path)
+        logging.info(f"Copied failed conversion to: {failed_path}")
         
-        # Check codec - convert any non-H.264 video
-        codec_name = input_video_stream.codec_context.name
-        if codec_name in ['h264', 'avc']:
-            input_container.close()
-            return False, f"Already H.264 (codec: {codec_name})"
-        
-        # Create output container
-        output_container = av.open(output_path, 'w')
-        
-        # Add video stream with H.264 codec
-        output_video_stream = output_container.add_stream('h264', rate=input_video_stream.average_rate)
-        output_video_stream.width = input_video_stream.width
-        output_video_stream.height = input_video_stream.height
-        output_video_stream.pix_fmt = 'yuv420p'
-        output_video_stream.bit_rate = input_video_stream.bit_rate or 2000000
-        
-        # Copy audio stream if exists
-        audio_stream = None
-        output_audio_stream = None
-        if input_container.streams.audio:
-            audio_stream = input_container.streams.audio[0]
-            # Create audio stream with correct parameters from the start
-            output_audio_stream = output_container.add_stream('aac', rate=audio_stream.rate)
-            # Set layout which automatically sets channels (don't set channels directly)
-            if hasattr(audio_stream, 'layout') and audio_stream.layout:
-                output_audio_stream.layout = audio_stream.layout
-        
-        # Process frames
-        for packet in input_container.demux():
-            if packet.stream.type == 'video':
-                for frame in packet.decode():
-                    # Encode frame to H.264
-                    for out_packet in output_video_stream.encode(frame):
-                        output_container.mux(out_packet)
-            elif packet.stream.type == 'audio' and output_audio_stream:
-                for frame in packet.decode():
-                    # Re-encode audio
-                    for out_packet in output_audio_stream.encode(frame):
-                        output_container.mux(out_packet)
-        
-        # Flush streams
-        for packet in output_video_stream.encode():
-            output_container.mux(packet)
-        if output_audio_stream:
-            for packet in output_audio_stream.encode():
-                output_container.mux(packet)
-        
-        # Close containers
-        input_container.close()
-        output_container.close()
-        
-        return True, output_path
-        
-    except Exception as e:
-        return False, str(e)
+        # Try to remove original, but don't fail if we can't
+        try:
+            os.remove(input_path)
+            logging.info(f"Removed original file: {input_path}")
+        except Exception as remove_error:
+            logging.warning(f"Could not remove original {input_path}: {remove_error}")
+            
+    except Exception as copy_error:
+        logging.error(f"Failed to copy {input_path} to {failed_path}: {copy_error}", exc_info=True)
+
+    logging.error(f"All conversion attempts failed for {input_path}")
+    return False, f"Failed after {max_attempts} PyAV attempts and VLC fallback"
 
 def download_media(url, output_path):
     """Download media file from URL."""
@@ -313,6 +628,51 @@ def download_media(url, output_path):
                 os.remove(output_path)
             except:
                 pass
+        return False
+
+def validate_downloaded_file(file_path):
+    """Validate the downloaded file to ensure it is complete and not corrupted."""
+    try:
+        logging.info(f"Validating downloaded file: {file_path}")
+
+        # Check if file exists
+        if not os.path.exists(file_path):
+            logging.error(f"File does not exist: {file_path}")
+            return False
+
+        # Check file size
+        file_size = os.path.getsize(file_path)
+        if file_size < 100:  # Arbitrary minimum size for a valid file
+            logging.error(f"File is too small to be valid: {file_size} bytes")
+            return False
+
+        # Read the first few bytes to check for valid magic numbers
+        with open(file_path, 'rb') as f:
+            magic = f.read(32)
+
+        # Check for valid image formats
+        is_valid_jpg = magic[:2] == b'\xff\xd8' or magic[:3] == b'\xff\xd8\xff'
+        is_valid_png = magic[:8] == b'\x89PNG\r\n\x1a\n'
+
+        # Check for valid video formats (MP4, MOV, M4V)
+        is_valid_mp4 = (
+            len(magic) >= 12 and 
+            (magic[4:8] == b'ftyp' or  # Standard MP4
+             magic[4:8] == b'mdat' or  # Media data
+             magic[4:8] == b'moov' or  # Movie atom
+             magic[4:8] == b'wide')    # Wide atom
+        )
+
+        # If the file doesn't match expected formats, it might be corrupted
+        if not (is_valid_jpg or is_valid_png or is_valid_mp4):
+            logging.error("File format is not recognized or is corrupted.")
+            return False
+
+        logging.info("File validation successful.")
+        return True
+
+    except Exception as e:
+        logging.error(f"Error during file validation: {e}", exc_info=True)
         return False
 
 def get_file_extension(media_type):
@@ -481,14 +841,16 @@ class SnapchatDownloaderGUI:
         
         self.convert_checkbox = ttk.Checkbutton(
             conversion_frame, 
-            text="Convert HEVC videos to H.264 for better compatibility",
+            text="Convert videos to H.264 for better compatibility",
             variable=self.convert_hevc,
             style="Info.TLabel"
         )
         self.convert_checkbox.pack(anchor=tk.W)
         
+        # Check available conversion tools and display status
+        conversion_status = self.get_conversion_status()
         conversion_info = ttk.Label(input_card,
-                                   text="Recommended: Creates H.264 versions that play in Windows Media Player and browsers",
+                                   text=conversion_status,
                                    style="Info.TLabel")
         conversion_info.pack(anchor=tk.W, pady=(0, 20))
         
@@ -554,6 +916,24 @@ class SnapchatDownloaderGUI:
         directory = filedialog.askdirectory(title="Select Output Directory")
         if directory:
             self.output_path.set(directory)
+    
+    def get_conversion_status(self):
+        """Check what conversion tools are available and return status message."""
+        tools = []
+        
+        if HAS_PYAV:
+            tools.append("PyAV")
+        
+        vlc_exe = find_vlc_executable()
+        if vlc_exe or HAS_VLC:
+            tools.append("VLC")
+        
+        if not tools:
+            return ("⚠ No conversion tools found. Videos will be downloaded in original format.\n"
+                    "Install PyAV (pip install av) or VLC (https://www.videolan.org/) for H.264 conversion.")
+        
+        tools_str = " & ".join(tools)
+        return f"✓ Conversion available via {tools_str}. Videos will be converted to H.264 for Windows compatibility."
     
     def log(self, message):
         """Add message to log area."""
@@ -687,24 +1067,33 @@ class SnapchatDownloaderGUI:
                             self.log("  ✓ Set EXIF metadata")
                     elif media_type == "Video":
                         # Convert all videos to H.264 by default
-                        if HAS_PYAV:
-                            self.log("  🔄 Converting to H.264...")
-                            success, result = convert_hevc_to_h264(str(file_path))
+                        self.log("  🔄 Converting to H.264...")
+                        
+                        # Check if any conversion tool is available
+                        if not HAS_PYAV and not find_vlc_executable() and not HAS_VLC:
+                            self.log("  ⚠ No conversion tools available - keeping original format")
+                            self.log("  ℹ Install PyAV (pip install av) or VLC for automatic H.264 conversion")
+                            # Still count as success - video was downloaded
+                        else:
+                            # Pass the custom failed_dir path
+                            failed_conversions_dir = str(output_path / "failed_conversions")
+                            success, result = convert_hevc_to_h264(
+                                str(file_path), 
+                                failed_dir_path=failed_conversions_dir
+                            )
                             if success:
                                 self.log(f"  ✓ Converted to H.264")
                                 # Replace original with converted file
-                                os.remove(str(file_path))
-                                os.rename(result, str(file_path))
+                                try:
+                                    os.remove(str(file_path))
+                                    os.rename(result, str(file_path))
+                                except Exception as rename_error:
+                                    self.log(f"  ⚠ Could not replace original: {rename_error}")
                                 # Set timestamps on the file
                                 set_file_timestamps(str(file_path), date_obj)
                             else:
-                                if "Already H.264" in result:
-                                    self.log(f"  ℹ {result} - no conversion needed")
-                                else:
-                                    self.log(f"  ⚠ Conversion failed: {result}")
-                        else:
-                            self.log("  ⚠ PyAV not installed - keeping original video")
-                            self.log("  ℹ Install PyAV for automatic conversion: pip install av")
+                                self.log(f"  ⚠ Conversion failed: {result}")
+                                # Don't count as error - file is still downloaded in original format
                         
                         # Try to set video metadata, but don't fail if it doesn't work
                         if HAS_MUTAGEN:
@@ -718,6 +1107,12 @@ class SnapchatDownloaderGUI:
                     
                     # Set file timestamps
                     set_file_timestamps(str(file_path), date_obj)
+                    
+                    # Validate the downloaded file
+                    if not validate_downloaded_file(str(file_path)):
+                        self.log("  ⚠ Downloaded file is corrupted or incomplete")
+                        error_count += 1
+                        continue
                     
                     success_count += 1
                 else:

@@ -3,3 +3,4 @@ pillow
 piexif
 mutagen
 av
+python-vlc
