@@ -2,6 +2,32 @@
 
 A user-friendly desktop application to download and preserve your Snapchat memories with their original metadata, including dates and location information.
 
+The tool will also attempt to reattach any overlay images back onto the original image or video when an overlay/-main pair is present in ZIP exports. To process and merge overlays onto videos the system requires `ffmpeg` to be installed and available in your PATH (see below for recommended installation).
+
+## Installing FFmpeg (required for video overlay merging)
+
+To enable merging overlays onto videos the app uses `ffmpeg`. Install and make `ffmpeg` available on your PATH, then restart the app.
+
+- Windows (recommended):
+   1. Download a static build from https://www.gyan.dev/ffmpeg/builds/ or https://www.ffmpeg.org/download.html
+   2. Extract the archive and copy the `bin\ffmpeg.exe` path (for example `C:\ffmpeg\bin`) into your System Environment Variable `Path`.
+   3. Open a new Command Prompt and run `ffmpeg -version` to verify.
+
+- macOS (Homebrew):
+   ```bash
+   brew install ffmpeg
+   ffmpeg -version
+   ```
+
+- Linux (Debian/Ubuntu):
+   ```bash
+   sudo apt update
+   sudo apt install ffmpeg
+   ffmpeg -version
+   ```
+
+If `ffmpeg -version` prints version information, the app will be able to process video overlays. If you cannot install `ffmpeg`, the tool will still process images and will skip video-overlay merging (it will log a warning).
+
 ## 📋 Overview
 
 This tool helps you download all your Snapchat memories using the `memories_history.json` file from your Snapchat data export. It preserves important metadata like creation dates, timestamps, and GPS coordinates by embedding them directly into the downloaded media files.

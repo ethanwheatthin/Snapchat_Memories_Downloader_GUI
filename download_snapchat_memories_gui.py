@@ -12,14 +12,26 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import logging
 import zipfile
+import tempfile
+import re
 
-# For setting file timestamps
+# For PIL and piexif: detect availability separately
+HAS_PIEXIF = False
+HAS_PIL = False
 try:
+    # Try to import PIL.Image independently so we can use it even if piexif is missing
+    from PIL import Image as PILImage
+    HAS_PIL = True
+except Exception:
+    HAS_PIL = False
+
+try:
+    # piexif is optional and required only for writing EXIF
     from PIL import Image
     from PIL.ExifTags import TAGS, GPSTAGS
     import piexif
     HAS_PIEXIF = True
-except ImportError:
+except Exception:
     HAS_PIEXIF = False
 
 # For setting video metadata without ffmpeg
@@ -616,6 +628,182 @@ def extract_media_from_zip(zip_path, output_path):
             except Exception as cleanup_error:
                 logging.debug(f"Could not clean up temp directory: {cleanup_error}")
 
+def merge_images(main_img_path, overlay_img_path, output_path):
+    """Merge overlay image on top of main image and save to output_path.
+
+    - Resizes overlay to match main if sizes differ.
+    - Preserves alpha channel if present by converting to RGBA.
+    """
+    if not HAS_PIL:
+        logging.error("Pillow is not installed; cannot merge images")
+        return False, "Pillow not installed"
+
+    try:
+        main = PILImage.open(main_img_path).convert('RGBA')
+        overlay = PILImage.open(overlay_img_path).convert('RGBA')
+
+        if overlay.size != main.size:
+            overlay = overlay.resize(main.size, PILImage.LANCZOS)
+
+        merged = PILImage.alpha_composite(main, overlay)
+
+        # Determine output format from output_path extension
+        ext = Path(output_path).suffix.lower()
+        if ext in ['.jpg', '.jpeg']:
+            # JPEG doesn't support alpha; flatten against white background
+            bg = PILImage.new('RGB', merged.size, (255, 255, 255))
+            bg.paste(merged, mask=merged.split()[3])
+            bg.save(output_path, quality=95)
+        else:
+            # PNG or other formats supporting alpha
+            merged.save(output_path)
+
+        return True, output_path
+
+    except Exception as e:
+        logging.error(f"Error merging images: {e}", exc_info=True)
+        return False, str(e)
+
+
+def merge_video_overlay(main_video_path, overlay_image_path, output_path):
+    """Overlay an image on top of a video using ffmpeg.
+
+    Returns (True, output_path) on success or (False, error_message).
+    """
+    try:
+        if not check_ffmpeg():
+            logging.warning("ffmpeg not found; cannot merge video overlay")
+            return False, "ffmpeg not found"
+
+        # Build ffmpeg command to overlay image onto video (overlay at 0,0)
+        # Keep audio stream, encode video with libx264 for compatibility
+        cmd = [
+            'ffmpeg', '-y',
+            '-i', str(main_video_path),
+            '-i', str(overlay_image_path),
+            '-filter_complex', 'overlay=0:0',
+            '-c:a', 'copy',
+            '-c:v', 'libx264', '-crf', '18', '-preset', 'veryfast',
+            str(output_path)
+        ]
+
+        logging.info(f"Running ffmpeg to merge video overlay: {' '.join(cmd)}")
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        if proc.returncode != 0:
+            logging.error(f"ffmpeg failed: {proc.stderr}")
+            return False, proc.stderr
+
+        # Verify output exists and has reasonable size
+        if os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
+            return True, str(output_path)
+        else:
+            return False, "ffmpeg did not produce output file"
+
+    except subprocess.TimeoutExpired:
+        return False, "ffmpeg timeout"
+    except Exception as e:
+        logging.error(f"Error merging video overlay: {e}", exc_info=True)
+        return False, str(e)
+
+
+def process_zip_overlay(zip_path, output_dir):
+    """Extract ZIP to a temp directory, find -main/-overlay pairs, merge them, and save -merged files to output_dir.
+
+    Returns a list of merged file paths.
+    """
+    merged_files = []
+    temp_dir = None
+    try:
+        logging.info(f"Processing ZIP for overlays: {zip_path}")
+        temp_dir = Path(tempfile.mkdtemp(prefix="zip_extract_"))
+
+        with zipfile.ZipFile(zip_path, 'r') as z:
+            # Inspect zip member names (this looks deep into nested folders)
+            namelist = [n for n in z.namelist() if not n.endswith('/')]
+
+            # Build map by base name from zip members (ignore differing extensions)
+            pattern_main = re.compile(r'(?P<base>.+)-main(?P<ext>\.[^.]+)$', re.IGNORECASE)
+            pattern_overlay = re.compile(r'(?P<base>.+)-overlay(?P<ext>\.[^.]+)$', re.IGNORECASE)
+
+            files_by_key = {}
+            for member in namelist:
+                basename = Path(member).name
+                m_main = pattern_main.match(basename)
+                m_ov = pattern_overlay.match(basename)
+                if m_main:
+                    base = m_main.group('base')
+                    ext = m_main.group('ext').lower()
+                    files_by_key.setdefault(base, {})['main'] = (member, ext)
+                elif m_ov:
+                    base = m_ov.group('base')
+                    ext = m_ov.group('ext').lower()
+                    files_by_key.setdefault(base, {})['overlay'] = (member, ext)
+
+            # Extract only matching members into temp_dir
+            for base, pair in files_by_key.items():
+                for kind in ('main', 'overlay'):
+                    if kind in pair:
+                        member_path, member_ext = pair[kind]
+                        target_path = temp_dir / Path(member_path).name
+                        try:
+                            # Ensure parent exists
+                            target_path_parent = target_path.parent
+                            target_path_parent.mkdir(parents=True, exist_ok=True)
+                            with z.open(member_path) as src, open(target_path, 'wb') as dst:
+                                shutil.copyfileobj(src, dst)
+                            # replace member entry with actual Path for later merging (keep ext too)
+                            pair[kind] = (target_path, member_ext)
+                        except Exception as e:
+                            logging.warning(f"Failed to extract {member_path} from ZIP: {e}")
+
+        out_dir = Path(output_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        # Supported video extensions for merging
+        video_exts = ('.mp4', '.mov', '.m4v', '.avi', '.mkv')
+
+        for base, pair in files_by_key.items():
+            if 'main' in pair and 'overlay' in pair:
+                try:
+                    main_p, main_ext = pair['main']
+                    ov_p, ov_ext = pair['overlay']
+                    out_ext = main_ext or ov_ext or '.jpg'
+                    out_name = f"{base}-merged{out_ext}"
+                    out_path = out_dir / out_name
+
+                    # If main file is a video, attempt video overlay merge
+                    if str(main_ext).lower() in video_exts:
+                        success, result = merge_video_overlay(main_p, ov_p, out_path)
+                    else:
+                        success, result = merge_images(str(main_p), str(ov_p), str(out_path))
+
+                    if success:
+                        logging.info(f"Merged created: {out_path}")
+                        merged_files.append(str(out_path))
+                    else:
+                        logging.warning(f"Failed to merge for {base}: {result}")
+
+                except Exception as e:
+                    logging.error(f"Unexpected error while merging {base}: {e}", exc_info=True)
+                    # Continue processing other pairs
+                    continue
+
+        return merged_files
+
+    except zipfile.BadZipFile as e:
+        logging.error(f"Invalid ZIP file: {zip_path} - {e}")
+        return []
+    except Exception as e:
+        logging.error(f"Error processing ZIP overlays: {e}", exc_info=True)
+        return []
+    finally:
+        # Cleanup temp dir
+        if temp_dir and temp_dir.exists():
+            try:
+                shutil.rmtree(temp_dir)
+            except Exception as cleanup_error:
+                logging.debug(f"Could not remove temp dir: {cleanup_error}")
+
 def download_media(url, output_path, max_retries=3, progress_callback=None):
     """Download media file from URL with retry mechanism and optional progress callback."""
     last_error = None
@@ -702,27 +890,36 @@ def download_media(url, output_path, max_retries=3, progress_callback=None):
                 if progress_callback:
                     progress_callback(msg)
                 zip_path = output_path + ".zip"
-                
+
                 try:
                     os.rename(output_path, zip_path)
-                    
-                    if extract_media_from_zip(zip_path, output_path):
-                        # Clean up the ZIP file after successful extraction
+
+                    # Try to process overlay pairs inside the ZIP
+                    merged = process_zip_overlay(zip_path, str(Path(output_path).parent))
+                    if merged:
+                        # If merged files were created, remove the ZIP and treat as success
                         try:
                             os.remove(zip_path)
-                            logging.info("Successfully extracted media from ZIP")
+                            logging.info(f"Created merged images: {merged}")
                         except Exception as cleanup_error:
                             logging.warning(f"Could not remove ZIP file: {cleanup_error}")
                     else:
-                        # Restore ZIP file if extraction failed - keep it for manual inspection
-                        try:
-                            if os.path.exists(zip_path):
-                                os.rename(zip_path, output_path)
-                            logging.warning("Failed to extract media from ZIP - keeping original ZIP file")
-                        except Exception as restore_error:
-                            logging.warning(f"Could not restore ZIP file: {restore_error}")
-                        # Don't return False - treat as partial success (file was downloaded)
-                        
+                        # Fall back to extracting the first media file (legacy behavior)
+                        if extract_media_from_zip(zip_path, output_path):
+                            try:
+                                os.remove(zip_path)
+                                logging.info("Successfully extracted media from ZIP")
+                            except Exception as cleanup_error:
+                                logging.warning(f"Could not remove ZIP file: {cleanup_error}")
+                        else:
+                            # Restore ZIP file if extraction failed - keep it for manual inspection
+                            try:
+                                if os.path.exists(zip_path):
+                                    os.rename(zip_path, output_path)
+                                logging.warning("Failed to extract media from ZIP - keeping original ZIP file")
+                            except Exception as restore_error:
+                                logging.warning(f"Could not restore ZIP file: {restore_error}")
+
                 except Exception as zip_error:
                     logging.warning(f"Error handling ZIP file: {zip_error} - keeping as-is")
                     # Continue anyway - file was downloaded even if ZIP handling failed
