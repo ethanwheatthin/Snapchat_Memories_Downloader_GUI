@@ -616,104 +616,164 @@ def extract_media_from_zip(zip_path, output_path):
             except Exception as cleanup_error:
                 logging.debug(f"Could not clean up temp directory: {cleanup_error}")
 
-def download_media(url, output_path):
-    """Download media file from URL."""
-    try:
-        response = requests.get(url, stream=True, timeout=30)
-        response.raise_for_status()
-        
-        with open(output_path, 'wb') as f:
-            for chunk in response.iter_content(chunk_size=8192):
-                f.write(chunk)
-        
-        # Validate the downloaded file
-        with open(output_path, 'rb') as f:
-            magic = f.read(32)  # Read more bytes for better validation
-        
-        # Check if it's HTML (error page)
-        is_html = (magic[:5].lower() == b'<!doc' or 
-                   magic[:5].lower() == b'<html' or
-                   b'<html' in magic.lower() or
-                   b'<!doctype' in magic.lower())
-        
-        if is_html:
-            os.remove(output_path)
-            return False
-        
-        # Validate file type based on magic numbers
-        if len(magic) < 4:
-            os.remove(output_path)
-            return False
-        
-        # Check for valid image formats
-        is_valid_jpg = magic[:2] == b'\xff\xd8' or magic[:3] == b'\xff\xd8\xff'
-        is_valid_png = magic[:8] == b'\x89PNG\r\n\x1a\n'
-        
-        # Check for valid video formats (MP4, MOV, M4V)
-        is_valid_mp4 = (len(magic) >= 12 and 
-                       (magic[4:8] == b'ftyp' or  # Standard MP4
-                        magic[4:8] == b'mdat' or  # Media data
-                        magic[4:8] == b'moov' or  # Movie atom
-                        magic[4:8] == b'wide'))   # Wide atom
-        
-        # Check for ZIP file (Snapchat sometimes serves media as ZIP)
-        is_valid_zip = magic[:4] == b'PK\x03\x04'
-        
-        # If the file doesn't match expected formats, it might be corrupted
-        if not (is_valid_jpg or is_valid_png or is_valid_mp4 or is_valid_zip):
-            # For videos, check alternate positions
-            if len(magic) >= 16:
-                is_valid_mp4 = magic[8:12] == b'ftyp' or magic[12:16] == b'ftyp'
+def download_media(url, output_path, max_retries=3, progress_callback=None):
+    """Download media file from URL with retry mechanism and optional progress callback."""
+    last_error = None
+    
+    for attempt in range(max_retries):
+        try:
+            # Exponential backoff: 2^attempt seconds (0, 2, 4 seconds)
+            if attempt > 0:
+                wait_time = 2 ** attempt
+                msg = f"Retry attempt {attempt + 1}/{max_retries} after {wait_time}s wait..."
+                logging.info(msg)
+                if progress_callback:
+                    progress_callback(msg)
+                time.sleep(wait_time)
+            else:
+                # First attempt
+                if progress_callback:
+                    progress_callback(f"Attempting download (1/{max_retries})")
             
-            if not is_valid_mp4:
-                # Log the magic number for debugging
-                magic_hex = magic[:8].hex()
-                logging.warning(f"Downloaded file has unexpected format (magic: {magic_hex})")
-        
-        # If it's a ZIP file, extract the media from it
-        if is_valid_zip:
-            logging.info("Downloaded file is a ZIP archive, extracting media...")
-            zip_path = output_path + ".zip"
+            response = requests.get(url, stream=True, timeout=60)  # Increased timeout
+            response.raise_for_status()
             
-            try:
-                os.rename(output_path, zip_path)
-                
-                if extract_media_from_zip(zip_path, output_path):
-                    # Clean up the ZIP file after successful extraction
-                    try:
-                        os.remove(zip_path)
-                        logging.info("Successfully extracted media from ZIP")
-                    except Exception as cleanup_error:
-                        logging.warning(f"Could not remove ZIP file: {cleanup_error}")
-                else:
-                    # Restore ZIP file if extraction failed - keep it for manual inspection
-                    try:
-                        if os.path.exists(zip_path):
-                            os.rename(zip_path, output_path)
-                        logging.warning("Failed to extract media from ZIP - keeping original ZIP file")
-                    except Exception as restore_error:
-                        logging.warning(f"Could not restore ZIP file: {restore_error}")
-                    # Don't return False - treat as partial success (file was downloaded)
-                    
-            except Exception as zip_error:
-                logging.warning(f"Error handling ZIP file: {zip_error} - keeping as-is")
-                # Continue anyway - file was downloaded even if ZIP handling failed
-        
-        # Final validation - check file size
-        file_size = os.path.getsize(output_path)
-        if file_size < 100:  # Files should be at least 100 bytes
-            os.remove(output_path)
-            return False
-        
-        return True
-    except Exception:
-        # Clean up file on error
-        if os.path.exists(output_path):
-            try:
+            with open(output_path, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    if chunk:  # Filter out keep-alive chunks
+                        f.write(chunk)
+            
+            # Validate the downloaded file
+            with open(output_path, 'rb') as f:
+                magic = f.read(32)  # Read more bytes for better validation
+            
+            # Check if it's HTML (error page)
+            is_html = (magic[:5].lower() == b'<!doc' or 
+                       magic[:5].lower() == b'<html' or
+                       b'<html' in magic.lower() or
+                       b'<!doctype' in magic.lower())
+            
+            if is_html:
                 os.remove(output_path)
-            except:
-                pass
-        return False
+                last_error = Exception("HTML page instead of media file")
+                if progress_callback:
+                    progress_callback("Downloaded content is HTML (likely an error page), will retry if possible")
+                continue
+            
+            # Validate file type based on magic numbers
+            if len(magic) < 4:
+                os.remove(output_path)
+                last_error = Exception("Invalid file - too small")
+                if progress_callback:
+                    progress_callback("Downloaded file is too small, will retry if possible")
+                continue
+            
+            # Check for valid image formats
+            is_valid_jpg = magic[:2] == b'\xff\xd8' or magic[:3] == b'\xff\xd8\xff'
+            is_valid_png = magic[:8] == b'\x89PNG\r\n\x1a\n'
+            
+            # Check for valid video formats (MP4, MOV, M4V)
+            is_valid_mp4 = (len(magic) >= 12 and 
+                           (magic[4:8] == b'ftyp' or  # Standard MP4
+                            magic[4:8] == b'mdat' or  # Media data
+                            magic[4:8] == b'moov' or  # Movie atom
+                            magic[4:8] == b'wide'))   # Wide atom
+            
+            # Check for ZIP file (Snapchat sometimes serves media as ZIP)
+            is_valid_zip = magic[:4] == b'PK\x03\x04'
+            
+            # If the file doesn't match expected formats, it might be corrupted
+            if not (is_valid_jpg or is_valid_png or is_valid_mp4 or is_valid_zip):
+                # For videos, check alternate positions
+                if len(magic) >= 16:
+                    is_valid_mp4 = magic[8:12] == b'ftyp' or magic[12:16] == b'ftyp'
+                
+                if not is_valid_mp4:
+                    # Log the magic number for debugging
+                    magic_hex = magic[:8].hex()
+                    logging.warning(f"Downloaded file has unexpected format (magic: {magic_hex})")
+                    if progress_callback:
+                        progress_callback(f"Downloaded file has unexpected format (magic: {magic_hex})")
+            
+            # If it's a ZIP file, extract the media from it
+            if is_valid_zip:
+                msg = "Downloaded file is a ZIP archive, extracting media..."
+                logging.info(msg)
+                if progress_callback:
+                    progress_callback(msg)
+                zip_path = output_path + ".zip"
+                
+                try:
+                    os.rename(output_path, zip_path)
+                    
+                    if extract_media_from_zip(zip_path, output_path):
+                        # Clean up the ZIP file after successful extraction
+                        try:
+                            os.remove(zip_path)
+                            logging.info("Successfully extracted media from ZIP")
+                        except Exception as cleanup_error:
+                            logging.warning(f"Could not remove ZIP file: {cleanup_error}")
+                    else:
+                        # Restore ZIP file if extraction failed - keep it for manual inspection
+                        try:
+                            if os.path.exists(zip_path):
+                                os.rename(zip_path, output_path)
+                            logging.warning("Failed to extract media from ZIP - keeping original ZIP file")
+                        except Exception as restore_error:
+                            logging.warning(f"Could not restore ZIP file: {restore_error}")
+                        # Don't return False - treat as partial success (file was downloaded)
+                        
+                except Exception as zip_error:
+                    logging.warning(f"Error handling ZIP file: {zip_error} - keeping as-is")
+                    # Continue anyway - file was downloaded even if ZIP handling failed
+            
+            # Final validation - check file size
+            file_size = os.path.getsize(output_path)
+            if file_size < 100:  # Files should be at least 100 bytes
+                logging.warning(f"Downloaded file too small ({file_size} bytes), attempt {attempt + 1}/{max_retries}")
+                os.remove(output_path)
+                last_error = Exception("File too small")
+                if progress_callback:
+                    progress_callback(f"Downloaded file too small ({file_size} bytes), will retry if possible")
+                continue
+            
+            # Success - return True
+            msg = f"Successfully downloaded file ({file_size} bytes)"
+            logging.info(msg)
+            if progress_callback:
+                progress_callback(msg)
+            return True
+            
+        except requests.exceptions.RequestException as e:
+            last_error = e
+            logging.warning(f"Download attempt {attempt + 1}/{max_retries} failed: {e}")
+            if progress_callback:
+                progress_callback(f"Download attempt {attempt + 1}/{max_retries} failed: {e}")
+            # Clean up partial file
+            if os.path.exists(output_path):
+                try:
+                    os.remove(output_path)
+                except Exception as cleanup_error:
+                    logging.debug(f"Cleanup error: {cleanup_error}")
+            # Continue to next retry
+        except Exception as e:
+            last_error = e
+            logging.error(f"Unexpected error during download attempt {attempt + 1}/{max_retries}: {e}")
+            if progress_callback:
+                progress_callback(f"Unexpected error during download attempt {attempt + 1}/{max_retries}: {e}")
+            # Clean up file on error
+            if os.path.exists(output_path):
+                try:
+                    os.remove(output_path)
+                except Exception as cleanup_error:
+                    logging.debug(f"Cleanup error: {cleanup_error}")
+            # Continue to next retry
+    
+    # All retries exhausted
+    logging.error(f"Download failed after {max_retries} attempts. Last error: {last_error}")
+    if progress_callback:
+        progress_callback(f"Download failed after {max_retries} attempts. Last error: {last_error}")
+    return False
 
 def validate_downloaded_file(file_path):
     """Validate the downloaded file to ensure it is complete and not corrupted."""
@@ -787,6 +847,7 @@ class SnapchatDownloaderGUI:
         self.json_path = tk.StringVar()
         self.output_path = tk.StringVar(value="downloads")
         self.convert_hevc = tk.BooleanVar(value=True)
+        self.max_retries = tk.IntVar(value=3)  # Number of download attempts (initial + retries)
         self.is_downloading = False
         self.stop_download = False
         
@@ -936,6 +997,22 @@ class SnapchatDownloaderGUI:
         )
         self.convert_checkbox.pack(anchor=tk.W)
         
+        # Download retries option
+        retries_frame = ttk.Frame(input_card, style="Card.TFrame")
+        retries_frame.pack(fill=tk.X, pady=(8, 12))
+        
+        retries_label = ttk.Label(retries_frame, text="Download Retries:", style="Header.TLabel")
+        retries_label.pack(side=tk.LEFT)
+        
+        # Use a Spinbox for retry count
+        retries_spin = tk.Spinbox(retries_frame, from_=1, to=10, width=5, textvariable=self.max_retries)
+        retries_spin.pack(side=tk.LEFT, padx=(8, 0))
+        
+        retries_info = ttk.Label(input_card,
+                                 text="Number of download attempts (initial try + retries)",
+                                 style="Info.TLabel")
+        retries_info.pack(anchor=tk.W, pady=(6, 10))
+
         # Check available conversion tools and display status
         conversion_status = self.get_conversion_status()
         conversion_info = ttk.Label(input_card,
@@ -984,10 +1061,11 @@ class SnapchatDownloaderGUI:
         scrollbar = ttk.Scrollbar(log_frame)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         
-        self.log_text = tk.Text(log_frame, height=8, wrap=tk.WORD, 
-                               font=("Consolas", 9), bg="#f8f9fa", 
-                               fg="#2f3542", relief=tk.FLAT, 
-                               yscrollcommand=scrollbar.set)
+        # Allow the log area to resize with the window by not forcing a fixed height
+        self.log_text = tk.Text(log_frame, wrap=tk.WORD,
+                       font=("Consolas", 9), bg="#f8f9fa",
+                       fg="#2f3542", relief=tk.FLAT,
+                       yscrollcommand=scrollbar.set)
         self.log_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar.config(command=self.log_text.yview)
     
@@ -1112,100 +1190,133 @@ class SnapchatDownloaderGUI:
                     self.log("\n⚠ Download stopped by user")
                     break
                 
-                self.update_progress(idx, total)
-                self.log(f"[{idx}/{total}] Processing...")
-                
-                # Extract metadata
-                date_str = item.get("Date", "")
-                media_type = item.get("Media Type", "Unknown")
-                location_str = item.get("Location", "")
-                download_url = item.get("Media Download Url", "")
-                
-                if not download_url:
-                    self.log("  ⚠ No download URL found, skipping\n")
-                    error_count += 1
-                    continue
-                
-                # Parse date and location
                 try:
-                    date_obj = parse_date(date_str)
-                except:
-                    self.log("  ⚠ Invalid date format, skipping\n")
-                    error_count += 1
-                    continue
+                    self.update_progress(idx, total)
+                    self.log(f"[{idx}/{total}] Processing...")
                     
-                latitude, longitude = parse_location(location_str)
-                
-                # Generate filename
-                date_formatted = date_obj.strftime("%Y%m%d_%H%M%S")
-                extension = get_file_extension(media_type)
-                filename = f"{date_formatted}_{idx}{extension}"
-                file_path = output_path / filename
-                
-                self.log(f"  File: {filename}")
-                self.log(f"  Type: {media_type}")
-                
-                # Download file
-                if download_media(download_url, str(file_path)):
-                    self.log("  ✓ Downloaded")
+                    # Extract metadata
+                    date_str = item.get("Date", "")
+                    media_type = item.get("Media Type", "Unknown")
+                    location_str = item.get("Location", "")
+                    download_url = item.get("Media Download Url", "")
                     
-                    # Set metadata
-                    if media_type == "Image" and extension.lower() in ['.jpg', '.jpeg']:
-                        if HAS_PIEXIF:
-                            set_image_exif_metadata(str(file_path), date_obj, latitude, longitude)
-                            self.log("  ✓ Set EXIF metadata")
-                    elif media_type == "Video":
-                        # Convert all videos to H.264 by default
-                        self.log("  🔄 Converting to H.264...")
-                        
-                        # Check if any conversion tool is available
-                        if not HAS_PYAV and not find_vlc_executable() and not HAS_VLC:
-                            self.log("  ⚠ No conversion tools available - keeping original format")
-                            self.log("  ℹ Install PyAV (pip install av) or VLC for automatic H.264 conversion")
-                            # Still count as success - video was downloaded
-                        else:
-                            # Pass the custom failed_dir path
-                            failed_conversions_dir = str(output_path / "failed_conversions")
-                            success, result = convert_hevc_to_h264(
-                                str(file_path), 
-                                failed_dir_path=failed_conversions_dir
-                            )
-                            if success:
-                                self.log(f"  ✓ Converted to H.264")
-                                # Replace original with converted file
-                                try:
-                                    os.remove(str(file_path))
-                                    os.rename(result, str(file_path))
-                                except Exception as rename_error:
-                                    self.log(f"  ⚠ Could not replace original: {rename_error}")
-                                # Set timestamps on the file
-                                set_file_timestamps(str(file_path), date_obj)
-                            else:
-                                self.log(f"  ⚠ Conversion failed: {result}")
-                                # Don't count as error - file is still downloaded in original format
-                        
-                        # Try to set video metadata, but don't fail if it doesn't work
-                        if HAS_MUTAGEN:
-                            metadata_result = set_video_metadata(str(file_path), date_obj, latitude, longitude)
-                            if metadata_result:
-                                self.log("  ✓ Set video metadata")
-                            else:
-                                self.log("  ℹ Video downloaded (metadata setting skipped to preserve file integrity)")
-                        else:
-                            self.log("  ℹ Video downloaded (install mutagen for metadata support)")
-                    
-                    # Set file timestamps
-                    set_file_timestamps(str(file_path), date_obj)
-                    
-                    # Validate the downloaded file
-                    if not validate_downloaded_file(str(file_path)):
-                        self.log("  ⚠ Downloaded file is corrupted or incomplete")
+                    if not download_url:
+                        self.log("  ⚠ No download URL found, skipping\n")
                         error_count += 1
                         continue
                     
-                    success_count += 1
-                else:
-                    self.log("  ✗ Download failed")
+                    # Parse date and location
+                    try:
+                        date_obj = parse_date(date_str)
+                    except:
+                        self.log("  ⚠ Invalid date format, skipping\n")
+                        error_count += 1
+                        continue
+                        
+                    latitude, longitude = parse_location(location_str)
+                    
+                    # Generate filename
+                    date_formatted = date_obj.strftime("%Y%m%d_%H%M%S")
+                    extension = get_file_extension(media_type)
+                    filename = f"{date_formatted}_{idx}{extension}"
+                    file_path = output_path / filename
+                    
+                    self.log(f"  File: {filename}")
+                    self.log(f"  Type: {media_type}")
+                    
+                    # Download file
+                    if download_media(download_url, str(file_path), max_retries=self.max_retries.get(), progress_callback=self.log):
+                        self.log("  ✓ Downloaded")
+                        
+                        # Set metadata
+                        if media_type == "Image" and extension.lower() in ['.jpg', '.jpeg']:
+                            if HAS_PIEXIF:
+                                try:
+                                    set_image_exif_metadata(str(file_path), date_obj, latitude, longitude)
+                                    self.log("  ✓ Set EXIF metadata")
+                                except Exception as exif_error:
+                                    self.log(f"  ⚠ EXIF metadata error: {exif_error}")
+                            # Always set file timestamps for images
+                            set_file_timestamps(str(file_path), date_obj)
+                        elif media_type == "Video":
+                            # Convert all videos to H.264 by default
+                            self.log("  🔄 Converting to H.264...")
+                            
+                            # Check if any conversion tool is available
+                            if not HAS_PYAV and not find_vlc_executable() and not HAS_VLC:
+                                self.log("  ⚠ No conversion tools available - keeping original format")
+                                self.log("  ℹ Install PyAV (pip install av) or VLC for automatic H.264 conversion")
+                                # Still count as success - video was downloaded
+                            else:
+                                # Pass the custom failed_dir path
+                                failed_conversions_dir = str(output_path / "failed_conversions")
+                                try:
+                                    success, result = convert_hevc_to_h264(
+                                        str(file_path), 
+                                        failed_dir_path=failed_conversions_dir
+                                    )
+                                    if success:
+                                        self.log(f"  ✓ Converted to H.264")
+                                        # Replace original with converted file
+                                        try:
+                                            os.remove(str(file_path))
+                                            os.rename(result, str(file_path))
+                                            # CRITICAL: Set timestamps AFTER file replacement
+                                            set_file_timestamps(str(file_path), date_obj)
+                                            self.log("  ✓ Set file timestamps")
+                                        except Exception as rename_error:
+                                            self.log(f"  ⚠ Could not replace original: {rename_error}")
+                                            # If replacement failed but conversion succeeded, still set timestamps on original
+                                            set_file_timestamps(str(file_path), date_obj)
+                                    else:
+                                        self.log(f"  ⚠ Conversion failed: {result}")
+                                        # Don't count as error - file is still downloaded in original format
+                                        # Set timestamps on original file
+                                        set_file_timestamps(str(file_path), date_obj)
+                                except Exception as conversion_error:
+                                    self.log(f"  ⚠ Conversion error: {conversion_error}")
+                                    # Ensure timestamps are set even if conversion crashes
+                                    set_file_timestamps(str(file_path), date_obj)
+                            
+                            # Try to set video metadata, but don't fail if it doesn't work
+                            if HAS_MUTAGEN:
+                                try:
+                                    metadata_result = set_video_metadata(str(file_path), date_obj, latitude, longitude)
+                                    if metadata_result:
+                                        self.log("  ✓ Set video metadata")
+                                    else:
+                                        self.log("  ℹ Video downloaded (metadata setting skipped to preserve file integrity)")
+                                except Exception as metadata_error:
+                                    self.log(f"  ⚠ Metadata error: {metadata_error}")
+                            else:
+                                self.log("  ℹ Video downloaded (install mutagen for metadata support)")
+                        
+                        # ALWAYS set file timestamps as final step for any media type
+                        # This ensures the creation/modification date is correct even if other metadata fails
+                        try:
+                            set_file_timestamps(str(file_path), date_obj)
+                            self.log("  ✓ File date set correctly")
+                        except Exception as timestamp_error:
+                            self.log(f"  ⚠ Failed to set file timestamps: {timestamp_error}")
+                        
+                        # Validate the downloaded file
+                        try:
+                            if not validate_downloaded_file(str(file_path)):
+                                self.log("  ⚠ Downloaded file is corrupted or incomplete")
+                                error_count += 1
+                                continue
+                        except Exception as validation_error:
+                            self.log(f"  ⚠ Validation error: {validation_error}")
+                        
+                        success_count += 1
+                    else:
+                        self.log("  ✗ Download failed")
+                        error_count += 1
+                
+                except Exception as item_error:
+                    # Catch any error during processing of this item to prevent crash
+                    self.log(f"  ✗ Error processing item: {item_error}")
+                    logging.error(f"Error processing item {idx}: {item_error}", exc_info=True)
                     error_count += 1
                 
                 self.log("")  # Empty line
