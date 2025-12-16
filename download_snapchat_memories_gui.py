@@ -720,97 +720,91 @@ def process_zip_overlay(zip_path, output_dir):
         with zipfile.ZipFile(zip_path, 'r') as z:
             # Inspect zip member names (this looks deep into nested folders)
             namelist = [n for n in z.namelist() if not n.endswith('/')]
+            z.extractall(temp_dir)
 
             # Build map by base name from zip members (ignore differing extensions)
             pattern_main = re.compile(r'(?P<base>.+)-main(?P<ext>\.[^.]+)$', re.IGNORECASE)
             pattern_overlay = re.compile(r'(?P<base>.+)-overlay(?P<ext>\.[^.]+)$', re.IGNORECASE)
 
-            files_by_key = {}
-            for member in namelist:
-                basename = Path(member).name
-                m_main = pattern_main.match(basename)
-                m_ov = pattern_overlay.match(basename)
+            # Map basenames to lists of files: {base: {"main": path, "overlay": path}}
+            pairs = {}
+            for member_name in namelist:
+                m_main = pattern_main.search(member_name)
+                m_overlay = pattern_overlay.search(member_name)
+
                 if m_main:
                     base = m_main.group('base')
-                    ext = m_main.group('ext').lower()
-                    files_by_key.setdefault(base, {})['main'] = (member, ext)
-                elif m_ov:
-                    base = m_ov.group('base')
-                    ext = m_ov.group('ext').lower()
-                    files_by_key.setdefault(base, {})['overlay'] = (member, ext)
+                    if base not in pairs:
+                        pairs[base] = {}
+                    pairs[base]['main'] = member_name
+                elif m_overlay:
+                    base = m_overlay.group('base')
+                    if base not in pairs:
+                        pairs[base] = {}
+                    pairs[base]['overlay'] = member_name
 
-            # Extract only matching members into temp_dir
-            for base, pair in files_by_key.items():
-                for kind in ('main', 'overlay'):
-                    if kind in pair:
-                        member_path, member_ext = pair[kind]
-                        target_path = temp_dir / Path(member_path).name
-                        try:
-                            # Ensure parent exists
-                            target_path_parent = target_path.parent
-                            target_path_parent.mkdir(parents=True, exist_ok=True)
-                            with z.open(member_path) as src, open(target_path, 'wb') as dst:
-                                shutil.copyfileobj(src, dst)
-                            # replace member entry with actual Path for later merging (keep ext too)
-                            pair[kind] = (target_path, member_ext)
-                        except Exception as e:
-                            logging.warning(f"Failed to extract {member_path} from ZIP: {e}")
+        # Now merge pairs
+        for base, files in pairs.items():
+            main_file = files.get('main')
+            overlay_file = files.get('overlay')
 
-        out_dir = Path(output_dir)
-        out_dir.mkdir(parents=True, exist_ok=True)
+            # Only merge if we have both
+            if not main_file or not overlay_file:
+                continue
 
-        # Supported video extensions for merging
-        video_exts = ('.mp4', '.mov', '.m4v', '.avi', '.mkv')
+            main_path = temp_dir / main_file
+            overlay_path = temp_dir / overlay_file
 
-        for base, pair in files_by_key.items():
-            if 'main' in pair and 'overlay' in pair:
-                try:
-                    main_p, main_ext = pair['main']
-                    ov_p, ov_ext = pair['overlay']
-                    out_ext = main_ext or ov_ext or '.jpg'
-                    out_name = f"{base}-merged{out_ext}"
-                    out_path = out_dir / out_name
+            # Determine type and merge
+            # For images: use merge_images
+            # For videos: use merge_video_overlay
+            ext = Path(main_file).suffix.lower()
+            is_video = ext in ['.mp4', '.mov', '.m4v', '.avi', '.mkv']
 
-                    # If main file is a video, attempt video overlay merge
-                    if str(main_ext).lower() in video_exts:
-                        success, result = merge_video_overlay(main_p, ov_p, out_path)
-                    else:
-                        success, result = merge_images(str(main_p), str(ov_p), str(out_path))
+            # Build output name: replace -main with -merged
+            output_name = Path(main_file).name.replace('-main', '-merged')
+            output_path = Path(output_dir) / output_name
 
-                    if success:
-                        logging.info(f"Merged created: {out_path}")
-                        merged_files.append(str(out_path))
-                    else:
-                        logging.warning(f"Failed to merge for {base}: {result}")
-
-                except Exception as e:
-                    logging.error(f"Unexpected error while merging {base}: {e}", exc_info=True)
-                    # Continue processing other pairs
-                    continue
+            if is_video:
+                success, result = merge_video_overlay(str(main_path), str(overlay_path), str(output_path))
+                if success:
+                    merged_files.append(str(output_path))
+                    logging.info(f"Merged video: {output_path}")
+                else:
+                    logging.warning(f"Failed to merge video {base}: {result}")
+            else:
+                # Image
+                success, result = merge_images(str(main_path), str(overlay_path), str(output_path))
+                if success:
+                    merged_files.append(str(output_path))
+                    logging.info(f"Merged image: {output_path}")
+                else:
+                    logging.warning(f"Failed to merge image {base}: {result}")
 
         return merged_files
 
-    except zipfile.BadZipFile as e:
-        logging.error(f"Invalid ZIP file: {zip_path} - {e}")
-        return []
     except Exception as e:
         logging.error(f"Error processing ZIP overlays: {e}", exc_info=True)
         return []
     finally:
-        # Cleanup temp dir
+        # Clean up temp directory
         if temp_dir and temp_dir.exists():
             try:
                 shutil.rmtree(temp_dir)
             except Exception as cleanup_error:
-                logging.debug(f"Could not remove temp dir: {cleanup_error}")
+                logging.debug(f"Could not clean up temp directory: {cleanup_error}")
+
 
 def download_media(url, output_path, max_retries=3, progress_callback=None):
-    """Download media file from URL with retry mechanism and optional progress callback."""
+    """Download media file from URL with retry mechanism and optional progress callback.
+
+    Returns True on success, False on failure.
+    """
     last_error = None
-    
+
     for attempt in range(max_retries):
         try:
-            # Exponential backoff: 2^attempt seconds (0, 2, 4 seconds)
+            # Exponential backoff for retries
             if attempt > 0:
                 wait_time = 2 ** attempt
                 msg = f"Retry attempt {attempt + 1}/{max_retries} after {wait_time}s wait..."
@@ -819,158 +813,146 @@ def download_media(url, output_path, max_retries=3, progress_callback=None):
                     progress_callback(msg)
                 time.sleep(wait_time)
             else:
-                # First attempt
                 if progress_callback:
                     progress_callback(f"Attempting download (1/{max_retries})")
-            
-            response = requests.get(url, stream=True, timeout=60)  # Increased timeout
+
+            response = requests.get(url, stream=True, timeout=60)
             response.raise_for_status()
-            
-            with open(output_path, 'wb') as f:
-                for chunk in response.iter_content(chunk_size=8192):
-                    if chunk:  # Filter out keep-alive chunks
-                        f.write(chunk)
-            
-            # Validate the downloaded file
-            with open(output_path, 'rb') as f:
-                magic = f.read(32)  # Read more bytes for better validation
-            
-            # Check if it's HTML (error page)
-            is_html = (magic[:5].lower() == b'<!doc' or 
+
+            iterator = response.iter_content(chunk_size=8192)
+            try:
+                first_chunk = next(iterator)
+            except StopIteration:
+                last_error = Exception("No content in response")
+                if progress_callback:
+                    progress_callback("No content returned by server")
+                continue
+
+            magic = first_chunk[:32]
+
+            # Detect HTML error pages
+            is_html = (magic[:5].lower() == b'<!doc' or
                        magic[:5].lower() == b'<html' or
                        b'<html' in magic.lower() or
                        b'<!doctype' in magic.lower())
-            
             if is_html:
-                os.remove(output_path)
                 last_error = Exception("HTML page instead of media file")
                 if progress_callback:
                     progress_callback("Downloaded content is HTML (likely an error page), will retry if possible")
                 continue
-            
-            # Validate file type based on magic numbers
-            if len(magic) < 4:
-                os.remove(output_path)
-                last_error = Exception("Invalid file - too small")
-                if progress_callback:
-                    progress_callback("Downloaded file is too small, will retry if possible")
-                continue
-            
-            # Check for valid image formats
-            is_valid_jpg = magic[:2] == b'\xff\xd8' or magic[:3] == b'\xff\xd8\xff'
-            is_valid_png = magic[:8] == b'\x89PNG\r\n\x1a\n'
-            
-            # Check for valid video formats (MP4, MOV, M4V)
-            is_valid_mp4 = (len(magic) >= 12 and 
-                           (magic[4:8] == b'ftyp' or  # Standard MP4
-                            magic[4:8] == b'mdat' or  # Media data
-                            magic[4:8] == b'moov' or  # Movie atom
-                            magic[4:8] == b'wide'))   # Wide atom
-            
-            # Check for ZIP file (Snapchat sometimes serves media as ZIP)
+
+            # If ZIP, write directly to .zip target to avoid rename races
             is_valid_zip = magic[:4] == b'PK\x03\x04'
-            
-            # If the file doesn't match expected formats, it might be corrupted
-            if not (is_valid_jpg or is_valid_png or is_valid_mp4 or is_valid_zip):
-                # For videos, check alternate positions
-                if len(magic) >= 16:
-                    is_valid_mp4 = magic[8:12] == b'ftyp' or magic[12:16] == b'ftyp'
-                
-                if not is_valid_mp4:
-                    # Log the magic number for debugging
-                    magic_hex = magic[:8].hex()
-                    logging.warning(f"Downloaded file has unexpected format (magic: {magic_hex})")
-                    if progress_callback:
-                        progress_callback(f"Downloaded file has unexpected format (magic: {magic_hex})")
-            
-            # If it's a ZIP file, extract the media from it
             if is_valid_zip:
-                msg = "Downloaded file is a ZIP archive, extracting media..."
-                logging.info(msg)
-                if progress_callback:
-                    progress_callback(msg)
-                zip_path = output_path + ".zip"
+                zip_path = str(output_path) + ".zip"
+                write_path = zip_path
+            else:
+                write_path = output_path
 
+            # Write the first chunk and remaining content
+            try:
+                with open(write_path, 'wb') as fd:
+                    fd.write(first_chunk)
+                    for chunk in iterator:
+                        if chunk:
+                            fd.write(chunk)
+            except Exception as write_err:
+                last_error = write_err
+                logging.warning(f"Failed writing downloaded file to {write_path}: {write_err}")
                 try:
-                    os.rename(output_path, zip_path)
+                    if os.path.exists(write_path):
+                        os.remove(write_path)
+                except Exception:
+                    pass
+                continue
 
-                    # Try to process overlay pairs inside the ZIP
-                    merged = process_zip_overlay(zip_path, str(Path(output_path).parent))
+            # If we downloaded a ZIP, try to process it
+            if is_valid_zip:
+                try:
+                    if progress_callback:
+                        progress_callback("Downloaded ZIP archive, processing...")
+                    merged = process_zip_overlay(write_path, str(Path(output_path).parent))
                     if merged:
-                        # If merged files were created, remove the ZIP and treat as success
                         try:
-                            os.remove(zip_path)
-                            logging.info(f"Created merged images: {merged}")
-                        except Exception as cleanup_error:
-                            logging.warning(f"Could not remove ZIP file: {cleanup_error}")
+                            os.remove(write_path)
+                        except Exception:
+                            pass
+                        logging.info(f"Created merged images: {merged}")
+                        return (True, merged)
+                    # Fallback: extract first media file from ZIP into output_path
+                    if extract_media_from_zip(write_path, output_path):
+                        try:
+                            os.remove(write_path)
+                        except Exception:
+                            pass
+                        # Validate the extracted file below using output_path
+                        final_path = output_path
                     else:
-                        # Fall back to extracting the first media file (legacy behavior)
-                        if extract_media_from_zip(zip_path, output_path):
-                            try:
-                                os.remove(zip_path)
-                                logging.info("Successfully extracted media from ZIP")
-                            except Exception as cleanup_error:
-                                logging.warning(f"Could not remove ZIP file: {cleanup_error}")
-                        else:
-                            # Restore ZIP file if extraction failed - keep it for manual inspection
-                            try:
-                                if os.path.exists(zip_path):
-                                    os.rename(zip_path, output_path)
-                                logging.warning("Failed to extract media from ZIP - keeping original ZIP file")
-                            except Exception as restore_error:
-                                logging.warning(f"Could not restore ZIP file: {restore_error}")
+                        logging.warning(f"Could not extract media from ZIP: {write_path}")
+                        final_path = write_path
+                except Exception as zip_err:
+                    logging.warning(f"Error handling ZIP file: {zip_err}")
+                    final_path = write_path
+            else:
+                final_path = write_path
 
-                except Exception as zip_error:
-                    logging.warning(f"Error handling ZIP file: {zip_error} - keeping as-is")
-                    # Continue anyway - file was downloaded even if ZIP handling failed
-            
-            # Final validation - check file size
-            file_size = os.path.getsize(output_path)
-            if file_size < 100:  # Files should be at least 100 bytes
+            # Final validations on the file we will use
+            if not os.path.exists(final_path):
+                last_error = Exception(f"Downloaded file missing: {final_path}")
+                logging.warning(str(last_error))
+                if progress_callback:
+                    progress_callback(str(last_error))
+                continue
+
+            file_size = os.path.getsize(final_path)
+            if file_size < 100:
                 logging.warning(f"Downloaded file too small ({file_size} bytes), attempt {attempt + 1}/{max_retries}")
-                os.remove(output_path)
+                try:
+                    os.remove(final_path)
+                except Exception:
+                    pass
                 last_error = Exception("File too small")
                 if progress_callback:
                     progress_callback(f"Downloaded file too small ({file_size} bytes), will retry if possible")
                 continue
-            
-            # Success - return True
+
+            # Success
             msg = f"Successfully downloaded file ({file_size} bytes)"
             logging.info(msg)
             if progress_callback:
                 progress_callback(msg)
-            return True
-            
-        except requests.exceptions.RequestException as e:
-            last_error = e
-            logging.warning(f"Download attempt {attempt + 1}/{max_retries} failed: {e}")
+            return (True, None)
+
+        except requests.exceptions.RequestException as req_err:
+            last_error = req_err
+            logging.warning(f"Download attempt {attempt + 1}/{max_retries} failed: {req_err}")
             if progress_callback:
-                progress_callback(f"Download attempt {attempt + 1}/{max_retries} failed: {e}")
-            # Clean up partial file
-            if os.path.exists(output_path):
-                try:
+                progress_callback(f"Download attempt {attempt + 1}/{max_retries} failed: {req_err}")
+            # Clean up possible partial files
+            try:
+                if os.path.exists(output_path):
                     os.remove(output_path)
-                except Exception as cleanup_error:
-                    logging.debug(f"Cleanup error: {cleanup_error}")
-            # Continue to next retry
-        except Exception as e:
-            last_error = e
-            logging.error(f"Unexpected error during download attempt {attempt + 1}/{max_retries}: {e}")
+            except Exception:
+                pass
+            continue
+        except Exception as err:
+            last_error = err
+            logging.error(f"Unexpected error during download attempt {attempt + 1}/{max_retries}: {err}", exc_info=True)
             if progress_callback:
-                progress_callback(f"Unexpected error during download attempt {attempt + 1}/{max_retries}: {e}")
-            # Clean up file on error
-            if os.path.exists(output_path):
-                try:
+                progress_callback(f"Unexpected error during download attempt {attempt + 1}/{max_retries}: {err}")
+            try:
+                if os.path.exists(output_path):
                     os.remove(output_path)
-                except Exception as cleanup_error:
-                    logging.debug(f"Cleanup error: {cleanup_error}")
-            # Continue to next retry
-    
-    # All retries exhausted
+            except Exception:
+                pass
+            continue
+
+    # Exhausted retries
     logging.error(f"Download failed after {max_retries} attempts. Last error: {last_error}")
     if progress_callback:
         progress_callback(f"Download failed after {max_retries} attempts. Last error: {last_error}")
-    return False
+    return (False, None)
+
 
 def validate_downloaded_file(file_path):
     """Validate the downloaded file to ensure it is complete and not corrupted."""
@@ -1031,6 +1013,41 @@ def get_file_extension(media_type):
         return ".bin"
 
 # ==================== GUI Application ====================
+
+class ScrollableFrame(ttk.Frame):
+    """A scrollable frame that allows vertical scrolling of its content."""
+    def __init__(self, container, *args, **kwargs):
+        super().__init__(container)
+        # Canvas for scrolling
+        self.canvas = tk.Canvas(self, borderwidth=0, highlightthickness=0)
+        self.v_scrollbar = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
+        self.canvas.configure(yscrollcommand=self.v_scrollbar.set)
+
+        # Pack canvas and scrollbar
+        self.canvas.pack(side="left", fill="both", expand=True)
+        self.v_scrollbar.pack(side="right", fill="y")
+
+        # Inner frame where widgets should be placed
+        self.frame = ttk.Frame(self.canvas, *args, **kwargs)
+        self._window = self.canvas.create_window((0, 0), window=self.frame, anchor="nw")
+
+        # Update scrollregion when inner frame changes size
+        self.frame.bind("<Configure>", lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
+
+        # Make inner window width match canvas width
+        self.canvas.bind("<Configure>", lambda e: self.canvas.itemconfigure(self._window, width=e.width))
+
+        # Mouse wheel support (Windows / macOS typical behavior)
+        def _on_mousewheel(event):
+            try:
+                delta = int(-1 * (event.delta / 120))
+            except Exception:
+                delta = 0
+            if delta:
+                self.canvas.yview_scroll(delta, "units")
+
+        # Bind mousewheel to the canvas
+        self.canvas.bind_all("<MouseWheel>", _on_mousewheel)
 
 class SnapchatDownloaderGUI:
     def __init__(self, root):
@@ -1121,9 +1138,10 @@ class SnapchatDownloaderGUI:
     
     def create_widgets(self):
         """Create and layout all widgets."""
-        # Main container
-        main_frame = ttk.Frame(self.root, style="Main.TFrame", padding=20)
-        main_frame.pack(fill=tk.BOTH, expand=True)
+        # Main container (scrollable)
+        scroll_container = ScrollableFrame(self.root, style="Main.TFrame", padding=20)
+        scroll_container.pack(fill=tk.BOTH, expand=True)
+        main_frame = scroll_container.frame
         
         # Header card
         header_card = ttk.Frame(main_frame, style="Card.TFrame", padding=20)
@@ -1422,8 +1440,45 @@ class SnapchatDownloaderGUI:
                     self.log(f"  Type: {media_type}")
                     
                     # Download file
-                    if download_media(download_url, str(file_path), max_retries=self.max_retries.get(), progress_callback=self.log):
+                    download_success, merged_files = download_media(download_url, str(file_path), max_retries=self.max_retries.get(), progress_callback=self.log)
+                    if download_success:
                         self.log("  ✓ Downloaded")
+                        
+                        # If merged files were created from ZIP overlay, apply metadata to each
+                        if merged_files:
+                            self.log(f"  ℹ Processing {len(merged_files)} merged file(s) from ZIP overlay")
+                            for merged_file in merged_files:
+                                merged_path = Path(merged_file)
+                                self.log(f"  📄 {merged_path.name}")
+                                
+                                # Determine if it's a video or image
+                                ext = merged_path.suffix.lower()
+                                is_video = ext in ['.mp4', '.mov', '.m4v', '.avi', '.mkv']
+                                
+                                if is_video:
+                                    # Set video metadata
+                                    if HAS_MUTAGEN:
+                                        try:
+                                            metadata_result = set_video_metadata(str(merged_path), date_obj, latitude, longitude)
+                                            if metadata_result:
+                                                self.log("    ✓ Set video metadata")
+                                        except Exception as metadata_error:
+                                            self.log(f"    ⚠ Metadata error: {metadata_error}")
+                                    set_file_timestamps(str(merged_path), date_obj)
+                                    self.log("    ✓ Set file timestamps")
+                                else:
+                                    # Set image metadata
+                                    if HAS_PIEXIF and ext in ['.jpg', '.jpeg']:
+                                        try:
+                                            set_image_exif_metadata(str(merged_path), date_obj, latitude, longitude)
+                                            self.log("    ✓ Set EXIF metadata")
+                                        except Exception as exif_error:
+                                            self.log(f"    ⚠ EXIF metadata error: {exif_error}")
+                                    set_file_timestamps(str(merged_path), date_obj)
+                                    self.log("    ✓ Set file timestamps")
+                            
+                            success_count += 1
+                            continue
                         
                         # Set metadata
                         if media_type == "Image" and extension.lower() in ['.jpg', '.jpeg']:
