@@ -22,7 +22,16 @@ if __name__ == '__main__':
         merged = process_zip_overlay(zip_path, str(out_dir))
         if merged:
             print('Merged files:')
+            import re
+            pattern = re.compile(r"^\d{8}_\d{6}(_\d+)?\.[A-Za-z0-9]+$")
+            ok = True
             for f in merged:
-                print(' -', f)
+                name = os.path.basename(f)
+                print(' -', name)
+                if not pattern.match(name):
+                    print('   ⚠ Filename does not match expected date format:', name)
+                    ok = False
+            if ok:
+                print('All merged filenames match the expected date/time format.')
         else:
             print('No merged files created (check zip contents or pillow installation).')

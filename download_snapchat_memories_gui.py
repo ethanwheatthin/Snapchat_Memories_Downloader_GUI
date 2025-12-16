@@ -768,16 +768,94 @@ def process_zip_overlay(zip_path, output_dir):
             if is_video:
                 success, result = merge_video_overlay(str(main_path), str(overlay_path), str(output_path))
                 if success:
-                    merged_files.append(str(output_path))
-                    logging.info(f"Merged video: {output_path}")
+                    # Rename merged file to standard date/time format and remove originals
+                    try:
+                        # Use main file's modification time for timestamp when possible
+                        try:
+                            ts = datetime.fromtimestamp(main_path.stat().st_mtime)
+                        except Exception:
+                            ts = datetime.now()
+                        date_name = ts.strftime("%Y%m%d_%H%M%S")
+                        new_name = f"{date_name}{output_path.suffix}"
+                        new_path = Path(output_dir) / new_name
+
+                        # Ensure uniqueness
+                        count = 1
+                        while new_path.exists():
+                            new_path = Path(output_dir) / f"{date_name}_{count}{output_path.suffix}"
+                            count += 1
+
+                        os.rename(output_path, new_path)
+                        merged_files.append(str(new_path))
+                        logging.info(f"Merged video: {new_path}")
+
+                        # Try to remove the original files if present in output dir (safety) or temp dir
+                        try:
+                            orig_in_out = Path(output_dir) / Path(main_file).name
+                            if orig_in_out.exists() and orig_in_out != new_path:
+                                os.remove(orig_in_out)
+                                logging.info(f"Removed original main file from output dir: {orig_in_out}")
+                        except Exception as rm_err:
+                            logging.debug(f"Could not remove original main in output dir: {rm_err}")
+
+                        try:
+                            # main_path and overlay_path are in temp dir; attempt removal
+                            if main_path.exists():
+                                main_path.unlink()
+                            if overlay_path.exists():
+                                overlay_path.unlink()
+                        except Exception:
+                            pass
+
+                    except Exception as rename_err:
+                        logging.warning(f"Merged but could not rename video {base}: {rename_err}")
+                        merged_files.append(str(output_path))
                 else:
                     logging.warning(f"Failed to merge video {base}: {result}")
             else:
                 # Image
                 success, result = merge_images(str(main_path), str(overlay_path), str(output_path))
                 if success:
-                    merged_files.append(str(output_path))
-                    logging.info(f"Merged image: {output_path}")
+                    try:
+                        # Use main file's modification time for timestamp when possible
+                        try:
+                            ts = datetime.fromtimestamp(main_path.stat().st_mtime)
+                        except Exception:
+                            ts = datetime.now()
+                        date_name = ts.strftime("%Y%m%d_%H%M%S")
+                        new_name = f"{date_name}{output_path.suffix}"
+                        new_path = Path(output_dir) / new_name
+
+                        # Ensure uniqueness
+                        count = 1
+                        while new_path.exists():
+                            new_path = Path(output_dir) / f"{date_name}_{count}{output_path.suffix}"
+                            count += 1
+
+                        os.rename(output_path, new_path)
+                        merged_files.append(str(new_path))
+                        logging.info(f"Merged image: {new_path}")
+
+                        # Remove originals if present in output dir and temp dir
+                        try:
+                            orig_in_out = Path(output_dir) / Path(main_file).name
+                            if orig_in_out.exists() and orig_in_out != new_path:
+                                os.remove(orig_in_out)
+                                logging.info(f"Removed original main file from output dir: {orig_in_out}")
+                        except Exception as rm_err:
+                            logging.debug(f"Could not remove original main in output dir: {rm_err}")
+
+                        try:
+                            if main_path.exists():
+                                main_path.unlink()
+                            if overlay_path.exists():
+                                overlay_path.unlink()
+                        except Exception:
+                            pass
+
+                    except Exception as rename_err:
+                        logging.warning(f"Merged but could not rename image {base}: {rename_err}")
+                        merged_files.append(str(output_path))
                 else:
                     logging.warning(f"Failed to merge image {base}: {result}")
 
