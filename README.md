@@ -1,11 +1,10 @@
 # Snapchat Memories Downloader GUI
 
 A user-friendly desktop application to download and preserve your Snapchat memories with their original metadata, including dates and location information.
-Only available on Windows
 
-The tool will also attempt to reattach any overlay images back onto the original image or video when an overlay/-main pair is present in ZIP exports. To process and merge overlays onto videos the system requires `ffmpeg` to be installed and available in your PATH (see below for recommended installation).
+**Only available on Windows**
 
-**⚠️IMPORTANT DO THIS FIRST!⚠️:** For optimal processing of videos and captions, having VLC Media Player and FFmpeg installed on your system is highly recommended. VLC assists in smooth video playback and format conversion, while FFmpeg enhances video overlay merging. The program will attempt to reattach your captions and overlays. Having these tools helps the program ensure all media is processed. Download them here:
+**⚠️IMPORTANT DO THIS FIRST!⚠️: The tool will also attempt to reattach any overlay images back onto the original image or video when an overlay/-main pair is present in ZIP exports. ** For optimal processing of videos and captions, having VLC Media Player and FFmpeg installed on your system is highly recommended. VLC assists in smooth video playback and format conversion, while FFmpeg enhances video overlay merging. The program will attempt to reattach your captions and overlays. Having these tools helps the program ensure all media is processed. Download them here:
 
 - [VLC Media Player](https://www.videolan.org/)
 - [FFmpeg](https://www.ffmpeg.org/download.html)
