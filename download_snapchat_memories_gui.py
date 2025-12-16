@@ -358,7 +358,12 @@ def convert_with_vlc_subprocess(input_path, output_path):
         return False, str(e)
 
 def set_video_metadata(file_path, date_obj, latitude, longitude):
-    """Set metadata for video files using mutagen (no ffmpeg required)."""
+    """Set metadata for video files using mutagen (no ffmpeg required).
+    
+    Sets standard QuickTime metadata tags that are recognized by galleries and video players:
+    - Creation date (©day tag and file timestamps)
+    - Location data (when available)
+    """
     if not HAS_MUTAGEN:
         return False
     
@@ -379,9 +384,18 @@ def set_video_metadata(file_path, date_obj, latitude, longitude):
         try:
             video = MP4(file_path)
             
-            # Set creation date in ISO format
+            # Set creation date using multiple standard tags for better compatibility
+            # ISO 8601 format for ©day tag
             creation_time = date_obj.strftime("%Y-%m-%dT%H:%M:%SZ")
-            video["\xa9day"] = creation_time  # Date tag
+            video["\xa9day"] = creation_time  # Standard QuickTime date tag
+            
+            # Some players also recognize these tags
+            # Add creation date in various formats for maximum compatibility
+            try:
+                # Store as year for sorting/grouping
+                video["\xa9ART"] = date_obj.strftime("%Y")  # Year as artist field (some apps use this)
+            except Exception:
+                pass
             
             # Add location if available (using custom tags)
             if latitude is not None and longitude is not None:
@@ -419,6 +433,90 @@ def set_video_metadata(file_path, date_obj, latitude, longitude):
         # Clean up backup if it exists
         if os.path.exists(backup_path):
             os.remove(backup_path)
+        return False
+
+def set_video_metadata_ffmpeg(file_path, date_obj, latitude, longitude):
+    """Set video metadata using ffmpeg if available.
+    
+    This method sets standard metadata tags that are widely recognized by gallery apps:
+    - creation_time: Standard MP4 creation time metadata
+    - location: GPS coordinates if available
+    
+    Returns True if ffmpeg is available and metadata was set, False otherwise.
+    """
+    if not check_ffmpeg():
+        return False
+    
+    try:
+        # Create a temporary output file
+        temp_output = f"{file_path}.temp.mp4"
+        
+        # Format creation time in ISO 8601 format as required by ffmpeg
+        creation_time_str = date_obj.strftime("%Y-%m-%dT%H:%M:%S")
+        
+        # Build ffmpeg command to copy video/audio streams and add metadata
+        cmd = [
+            'ffmpeg', '-y',
+            '-i', str(file_path),
+            '-c', 'copy',  # Copy streams without re-encoding
+            '-metadata', f'creation_time={creation_time_str}',
+            '-metadata', f'date={creation_time_str}',
+        ]
+        
+        # Add location metadata if available
+        if latitude is not None and longitude is not None:
+            cmd.extend([
+                '-metadata', f'location={latitude:+.6f}{longitude:+.6f}/',
+                '-metadata', f'location-eng={latitude}, {longitude}',
+            ])
+        
+        cmd.append(str(temp_output))
+        
+        logging.debug(f"Setting video metadata with ffmpeg: {' '.join(cmd)}")
+        
+        # Run ffmpeg
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=60
+        )
+        
+        if result.returncode == 0 and os.path.exists(temp_output):
+            # Replace original file with the one that has metadata
+            try:
+                os.remove(file_path)
+                os.rename(temp_output, file_path)
+                logging.info(f"Successfully set video metadata using ffmpeg: {file_path}")
+                return True
+            except Exception as e:
+                logging.error(f"Failed to replace file after metadata update: {e}")
+                # Clean up temp file
+                if os.path.exists(temp_output):
+                    os.remove(temp_output)
+                return False
+        else:
+            logging.warning(f"ffmpeg metadata setting failed: {result.stderr}")
+            # Clean up temp file if it exists
+            if os.path.exists(temp_output):
+                os.remove(temp_output)
+            return False
+            
+    except subprocess.TimeoutExpired:
+        logging.error("ffmpeg metadata setting timed out")
+        if os.path.exists(temp_output):
+            try:
+                os.remove(temp_output)
+            except:
+                pass
+        return False
+    except Exception as e:
+        logging.error(f"Error setting video metadata with ffmpeg: {e}", exc_info=True)
+        if os.path.exists(temp_output):
+            try:
+                os.remove(temp_output)
+            except:
+                pass
         return False
 
 def set_file_timestamps(file_path, date_obj):
@@ -706,8 +804,13 @@ def merge_video_overlay(main_video_path, overlay_image_path, output_path):
         return False, str(e)
 
 
-def process_zip_overlay(zip_path, output_dir):
+def process_zip_overlay(zip_path, output_dir, date_obj=None):
     """Extract ZIP to a temp directory, find -main/-overlay pairs, merge them, and save -merged files to output_dir.
+
+    Args:
+        zip_path: Path to the ZIP file
+        output_dir: Directory to save merged files
+        date_obj: Optional datetime object from memories_history.json for accurate filenames
 
     Returns a list of merged file paths.
     """
@@ -770,11 +873,14 @@ def process_zip_overlay(zip_path, output_dir):
                 if success:
                     # Rename merged file to standard date/time format and remove originals
                     try:
-                        # Use main file's modification time for timestamp when possible
-                        try:
-                            ts = datetime.fromtimestamp(main_path.stat().st_mtime)
-                        except Exception:
-                            ts = datetime.now()
+                        # Use date from memories_history.json if available, otherwise use file modification time
+                        if date_obj:
+                            ts = date_obj
+                        else:
+                            try:
+                                ts = datetime.fromtimestamp(main_path.stat().st_mtime)
+                            except Exception:
+                                ts = datetime.now()
                         date_name = ts.strftime("%Y%m%d_%H%M%S")
                         new_name = f"{date_name}{output_path.suffix}"
                         new_path = Path(output_dir) / new_name
@@ -817,11 +923,14 @@ def process_zip_overlay(zip_path, output_dir):
                 success, result = merge_images(str(main_path), str(overlay_path), str(output_path))
                 if success:
                     try:
-                        # Use main file's modification time for timestamp when possible
-                        try:
-                            ts = datetime.fromtimestamp(main_path.stat().st_mtime)
-                        except Exception:
-                            ts = datetime.now()
+                        # Use date from memories_history.json if available, otherwise use file modification time
+                        if date_obj:
+                            ts = date_obj
+                        else:
+                            try:
+                                ts = datetime.fromtimestamp(main_path.stat().st_mtime)
+                            except Exception:
+                                ts = datetime.now()
                         date_name = ts.strftime("%Y%m%d_%H%M%S")
                         new_name = f"{date_name}{output_path.suffix}"
                         new_path = Path(output_dir) / new_name
@@ -873,10 +982,17 @@ def process_zip_overlay(zip_path, output_dir):
                 logging.debug(f"Could not clean up temp directory: {cleanup_error}")
 
 
-def download_media(url, output_path, max_retries=3, progress_callback=None):
+def download_media(url, output_path, max_retries=3, progress_callback=None, date_obj=None):
     """Download media file from URL with retry mechanism and optional progress callback.
 
-    Returns True on success, False on failure.
+    Args:
+        url: URL to download from
+        output_path: Path to save the downloaded file
+        max_retries: Number of download attempts
+        progress_callback: Optional callback function for progress updates
+        date_obj: Optional datetime object from memories_history.json for accurate filenames
+
+    Returns (True, None) on success, (False, None) on failure, or (True, [merged_files]) if ZIP overlay was processed.
     """
     last_error = None
 
@@ -949,7 +1065,7 @@ def download_media(url, output_path, max_retries=3, progress_callback=None):
                 try:
                     if progress_callback:
                         progress_callback("Downloaded ZIP archive, processing...")
-                    merged = process_zip_overlay(write_path, str(Path(output_path).parent))
+                    merged = process_zip_overlay(write_path, str(Path(output_path).parent), date_obj)
                     if merged:
                         try:
                             os.remove(write_path)
@@ -1518,7 +1634,7 @@ class SnapchatDownloaderGUI:
                     self.log(f"  Type: {media_type}")
                     
                     # Download file
-                    download_success, merged_files = download_media(download_url, str(file_path), max_retries=self.max_retries.get(), progress_callback=self.log)
+                    download_success, merged_files = download_media(download_url, str(file_path), max_retries=self.max_retries.get(), progress_callback=self.log, date_obj=date_obj)
                     if download_success:
                         self.log("  ✓ Downloaded")
                         
@@ -1534,14 +1650,29 @@ class SnapchatDownloaderGUI:
                                 is_video = ext in ['.mp4', '.mov', '.m4v', '.avi', '.mkv']
                                 
                                 if is_video:
-                                    # Set video metadata
-                                    if HAS_MUTAGEN:
+                                    # Set video metadata - try ffmpeg first for better compatibility, then mutagen
+                                    metadata_set = False
+                                    
+                                    # Try ffmpeg first (sets standard creation_time metadata)
+                                    try:
+                                        if set_video_metadata_ffmpeg(str(merged_path), date_obj, latitude, longitude):
+                                            self.log("    ✓ Set video metadata (ffmpeg)")
+                                            metadata_set = True
+                                    except Exception as ffmpeg_error:
+                                        self.log(f"    ℹ ffmpeg metadata setting failed, trying mutagen: {ffmpeg_error}")
+                                    
+                                    # Fall back to mutagen if ffmpeg didn't work
+                                    if not metadata_set and HAS_MUTAGEN:
                                         try:
-                                            metadata_result = set_video_metadata(str(merged_path), date_obj, latitude, longitude)
-                                            if metadata_result:
-                                                self.log("    ✓ Set video metadata")
+                                            if set_video_metadata(str(merged_path), date_obj, latitude, longitude):
+                                                self.log("    ✓ Set video metadata (mutagen)")
+                                                metadata_set = True
                                         except Exception as metadata_error:
                                             self.log(f"    ⚠ Metadata error: {metadata_error}")
+                                    
+                                    if not metadata_set:
+                                        self.log("    ℹ Video metadata not set (install ffmpeg or mutagen)")
+                                    
                                     set_file_timestamps(str(merged_path), date_obj)
                                     self.log("    ✓ Set file timestamps")
                                 else:
@@ -1608,18 +1739,28 @@ class SnapchatDownloaderGUI:
                                     # Ensure timestamps are set even if conversion crashes
                                     set_file_timestamps(str(file_path), date_obj)
                             
-                            # Try to set video metadata, but don't fail if it doesn't work
-                            if HAS_MUTAGEN:
+                            # Try to set video metadata - use ffmpeg first for better compatibility, then mutagen
+                            metadata_set = False
+                            
+                            # Try ffmpeg first (sets standard creation_time metadata)
+                            try:
+                                if set_video_metadata_ffmpeg(str(file_path), date_obj, latitude, longitude):
+                                    self.log("  ✓ Set video metadata (ffmpeg)")
+                                    metadata_set = True
+                            except Exception as ffmpeg_error:
+                                logging.debug(f"ffmpeg metadata setting failed: {ffmpeg_error}")
+                            
+                            # Fall back to mutagen if ffmpeg didn't work
+                            if not metadata_set and HAS_MUTAGEN:
                                 try:
-                                    metadata_result = set_video_metadata(str(file_path), date_obj, latitude, longitude)
-                                    if metadata_result:
-                                        self.log("  ✓ Set video metadata")
-                                    else:
-                                        self.log("  ℹ Video downloaded (metadata setting skipped to preserve file integrity)")
+                                    if set_video_metadata(str(file_path), date_obj, latitude, longitude):
+                                        self.log("  ✓ Set video metadata (mutagen)")
+                                        metadata_set = True
                                 except Exception as metadata_error:
                                     self.log(f"  ⚠ Metadata error: {metadata_error}")
-                            else:
-                                self.log("  ℹ Video downloaded (install mutagen for metadata support)")
+                            
+                            if not metadata_set:
+                                self.log("  ℹ Video downloaded (install ffmpeg or mutagen for embedded metadata)")
                         
                         # ALWAYS set file timestamps as final step for any media type
                         # This ensures the creation/modification date is correct even if other metadata fails

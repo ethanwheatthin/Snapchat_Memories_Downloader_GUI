@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+from datetime import datetime
 
 from download_snapchat_memories_gui import process_zip_overlay
 
@@ -18,8 +19,13 @@ if __name__ == '__main__':
     else:
         out_dir = Path('test_output')
         out_dir.mkdir(exist_ok=True)
+        
+        # Use a test date for consistent filename generation
+        test_date = datetime(2023, 6, 15, 14, 30, 45)
+        
         print(f'Found zip: {zip_path} -> extracting/processing to {out_dir}')
-        merged = process_zip_overlay(zip_path, str(out_dir))
+        print(f'Using test date: {test_date}')
+        merged = process_zip_overlay(zip_path, str(out_dir), test_date)
         if merged:
             print('Merged files:')
             import re
