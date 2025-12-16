@@ -440,13 +440,14 @@ def set_video_metadata_ffmpeg(file_path, date_obj, latitude, longitude):
     
     This method sets standard metadata tags that are widely recognized by gallery apps:
     - creation_time: Standard MP4 creation time metadata
-    - location: GPS coordinates if available
+    - location: GPS coordinates if available (ISO 6709 format)
     
     Returns True if ffmpeg is available and metadata was set, False otherwise.
     """
     if not check_ffmpeg():
         return False
     
+    temp_output = None
     try:
         # Create a temporary output file
         temp_output = f"{file_path}.temp.mp4"
@@ -463,7 +464,7 @@ def set_video_metadata_ffmpeg(file_path, date_obj, latitude, longitude):
             '-metadata', f'date={creation_time_str}',
         ]
         
-        # Add location metadata if available
+        # Add location metadata if available (ISO 6709 format: ±DD.DDDD±DDD.DDDD/)
         if latitude is not None and longitude is not None:
             cmd.extend([
                 '-metadata', f'location={latitude:+.6f}{longitude:+.6f}/',
@@ -504,7 +505,7 @@ def set_video_metadata_ffmpeg(file_path, date_obj, latitude, longitude):
             
     except subprocess.TimeoutExpired:
         logging.error("ffmpeg metadata setting timed out")
-        if os.path.exists(temp_output):
+        if temp_output and os.path.exists(temp_output):
             try:
                 os.remove(temp_output)
             except:
@@ -512,7 +513,7 @@ def set_video_metadata_ffmpeg(file_path, date_obj, latitude, longitude):
         return False
     except Exception as e:
         logging.error(f"Error setting video metadata with ffmpeg: {e}", exc_info=True)
-        if os.path.exists(temp_output):
+        if temp_output and os.path.exists(temp_output):
             try:
                 os.remove(temp_output)
             except:
