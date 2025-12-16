@@ -1,6 +1,7 @@
 # Snapchat Memories Downloader GUI
 
 A user-friendly desktop application to download and preserve your Snapchat memories with their original metadata, including dates and location information.
+Only available on Windows
 
 The tool will also attempt to reattach any overlay images back onto the original image or video when an overlay/-main pair is present in ZIP exports. To process and merge overlays onto videos the system requires `ffmpeg` to be installed and available in your PATH (see below for recommended installation).
 
