@@ -358,7 +358,12 @@ def convert_with_vlc_subprocess(input_path, output_path):
         return False, str(e)
 
 def set_video_metadata(file_path, date_obj, latitude, longitude):
-    """Set metadata for video files using mutagen (no ffmpeg required)."""
+    """Set metadata for video files using mutagen (no ffmpeg required).
+    
+    Sets standard QuickTime metadata tags that are recognized by galleries and video players:
+    - Creation date (©day tag and file timestamps)
+    - Location data (when available)
+    """
     if not HAS_MUTAGEN:
         return False
     
@@ -379,9 +384,18 @@ def set_video_metadata(file_path, date_obj, latitude, longitude):
         try:
             video = MP4(file_path)
             
-            # Set creation date in ISO format
+            # Set creation date using multiple standard tags for better compatibility
+            # ISO 8601 format for ©day tag
             creation_time = date_obj.strftime("%Y-%m-%dT%H:%M:%SZ")
-            video["\xa9day"] = creation_time  # Date tag
+            video["\xa9day"] = creation_time  # Standard QuickTime date tag
+            
+            # Some players also recognize these tags
+            # Add creation date in various formats for maximum compatibility
+            try:
+                # Store as year for sorting/grouping
+                video["\xa9ART"] = date_obj.strftime("%Y")  # Year as artist field (some apps use this)
+            except Exception:
+                pass
             
             # Add location if available (using custom tags)
             if latitude is not None and longitude is not None:
@@ -421,6 +435,91 @@ def set_video_metadata(file_path, date_obj, latitude, longitude):
             os.remove(backup_path)
         return False
 
+def set_video_metadata_ffmpeg(file_path, date_obj, latitude, longitude):
+    """Set video metadata using ffmpeg if available.
+    
+    This method sets standard metadata tags that are widely recognized by gallery apps:
+    - creation_time: Standard MP4 creation time metadata
+    - location: GPS coordinates if available (ISO 6709 format)
+    
+    Returns True if ffmpeg is available and metadata was set, False otherwise.
+    """
+    if not check_ffmpeg():
+        return False
+    
+    temp_output = None
+    try:
+        # Create a temporary output file
+        temp_output = f"{file_path}.temp.mp4"
+        
+        # Format creation time in ISO 8601 format as required by ffmpeg
+        creation_time_str = date_obj.strftime("%Y-%m-%dT%H:%M:%S")
+        
+        # Build ffmpeg command to copy video/audio streams and add metadata
+        cmd = [
+            'ffmpeg', '-y',
+            '-i', str(file_path),
+            '-c', 'copy',  # Copy streams without re-encoding
+            '-metadata', f'creation_time={creation_time_str}',
+            '-metadata', f'date={creation_time_str}',
+        ]
+        
+        # Add location metadata if available (ISO 6709 format: ±DD.DDDD±DDD.DDDD/)
+        if latitude is not None and longitude is not None:
+            cmd.extend([
+                '-metadata', f'location={latitude:+.6f}{longitude:+.6f}/',
+                '-metadata', f'location-eng={latitude}, {longitude}',
+            ])
+        
+        cmd.append(str(temp_output))
+        
+        logging.debug(f"Setting video metadata with ffmpeg: {' '.join(cmd)}")
+        
+        # Run ffmpeg
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=60
+        )
+        
+        if result.returncode == 0 and os.path.exists(temp_output):
+            # Replace original file with the one that has metadata
+            try:
+                os.remove(file_path)
+                os.rename(temp_output, file_path)
+                logging.info(f"Successfully set video metadata using ffmpeg: {file_path}")
+                return True
+            except Exception as e:
+                logging.error(f"Failed to replace file after metadata update: {e}")
+                # Clean up temp file
+                if os.path.exists(temp_output):
+                    os.remove(temp_output)
+                return False
+        else:
+            logging.warning(f"ffmpeg metadata setting failed: {result.stderr}")
+            # Clean up temp file if it exists
+            if os.path.exists(temp_output):
+                os.remove(temp_output)
+            return False
+            
+    except subprocess.TimeoutExpired:
+        logging.error("ffmpeg metadata setting timed out")
+        if temp_output and os.path.exists(temp_output):
+            try:
+                os.remove(temp_output)
+            except:
+                pass
+        return False
+    except Exception as e:
+        logging.error(f"Error setting video metadata with ffmpeg: {e}", exc_info=True)
+        if temp_output and os.path.exists(temp_output):
+            try:
+                os.remove(temp_output)
+            except:
+                pass
+        return False
+
 def set_file_timestamps(file_path, date_obj):
     """Set file modification and access times."""
     timestamp = date_obj.timestamp()
@@ -429,6 +528,168 @@ def set_file_timestamps(file_path, date_obj):
         os.utime(file_path, (timestamp, timestamp))
     except Exception:
         pass
+
+
+def enforce_portrait_video(file_path, timeout=300):
+    """Ensure the video is portrait (height >= width).
+
+    Attempts to physically rotate the video when necessary using ffmpeg (preferred)
+    or PyAV as a fallback. Returns (True, path) on success or (False, message) on failure.
+    """
+    try:
+        if not os.path.exists(file_path):
+            return False, "File not found"
+
+        # Try ffprobe/ffmpeg first
+        if check_ffmpeg():
+            try:
+                cmd = [
+                    'ffprobe', '-v', 'error', '-select_streams', 'v:0',
+                    '-show_entries', 'stream=width,height:stream_tags=rotate',
+                    '-of', 'json', file_path
+                ]
+                res = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+                info = json.loads(res.stdout) if res.stdout else {}
+                streams = info.get('streams', [])
+                if streams:
+                    s = streams[0]
+                    width = int(s.get('width', 0))
+                    height = int(s.get('height', 0))
+                    tags = s.get('tags') or {}
+                    rotate_tag = tags.get('rotate') if tags else None
+
+                    need_rotate = False
+                    vf = None
+
+                    if rotate_tag is not None:
+                        try:
+                            r = int(rotate_tag) % 360
+                            if r == 90:
+                                need_rotate = True
+                                vf = 'transpose=1'
+                            elif r == 270:
+                                need_rotate = True
+                                vf = 'transpose=2'
+                            elif r == 180:
+                                need_rotate = True
+                                vf = 'transpose=1,transpose=1'
+                        except Exception:
+                            pass
+                    else:
+                        # No rotate tag - check frame dimensions
+                        if width > height:
+                            need_rotate = True
+                            vf = 'transpose=1'
+
+                    if not need_rotate:
+                        return True, "Already portrait"
+
+                    out_path = f"{file_path}.rotated{Path(file_path).suffix}"
+                    ffmpeg_cmd = [
+                        'ffmpeg', '-y', '-i', file_path,
+                        '-vf', vf,
+                        '-c:v', 'libx264', '-crf', '18', '-preset', 'veryfast',
+                        '-c:a', 'copy', out_path
+                    ]
+                    proc = subprocess.run(ffmpeg_cmd, capture_output=True, text=True, timeout=timeout)
+                    if proc.returncode == 0 and os.path.exists(out_path) and os.path.getsize(out_path) > 1000:
+                        # Replace original with rotated
+                        try:
+                            backup = f"{file_path}.backup"
+                            shutil.move(file_path, backup)
+                            shutil.move(out_path, file_path)
+                            try:
+                                os.remove(backup)
+                            except Exception:
+                                pass
+                            return True, file_path
+                        except Exception as e:
+                            # Try to restore
+                            try:
+                                if os.path.exists(backup) and not os.path.exists(file_path):
+                                    shutil.move(backup, file_path)
+                            except Exception:
+                                pass
+                            if os.path.exists(out_path):
+                                os.remove(out_path)
+                            return False, f"Failed to replace original: {e}"
+                    else:
+                        if os.path.exists(out_path):
+                            try:
+                                os.remove(out_path)
+                            except Exception:
+                                pass
+                        return False, f"ffmpeg failed: {proc.stderr}"
+            except Exception as e:
+                logging.debug(f"ffmpeg portrait enforcement error: {e}", exc_info=True)
+
+
+        # Fallback to PyAV if available
+        if HAS_PYAV:
+            try:
+                input_container = av.open(file_path)
+                vstream = input_container.streams.video[0]
+                width = vstream.width
+                height = vstream.height
+                need_rotate = width > height
+                if not need_rotate:
+                    input_container.close()
+                    return True, "Already portrait"
+
+                out_path = f"{file_path}.rotated{Path(file_path).suffix}"
+                output_container = av.open(out_path, 'w')
+                output_vs = output_container.add_stream('h264', rate=vstream.average_rate)
+                output_vs.width = height
+                output_vs.height = width
+                output_vs.pix_fmt = 'yuv420p'
+
+                output_audio = None
+                if input_container.streams.audio:
+                    audio_stream = input_container.streams.audio[0]
+                    output_audio = output_container.add_stream('aac', rate=audio_stream.rate)
+                    if hasattr(audio_stream, 'layout') and audio_stream.layout:
+                        output_audio.layout = audio_stream.layout
+
+                for packet in input_container.demux():
+                    if packet.stream.type == 'video':
+                        for frame in packet.decode():
+                            img = frame.to_image().rotate(90, expand=True)
+                            new_frame = av.VideoFrame.from_image(img)
+                            for out_packet in output_vs.encode(new_frame):
+                                output_container.mux(out_packet)
+                    elif packet.stream.type == 'audio' and output_audio:
+                        for frame in packet.decode():
+                            for out_packet in output_audio.encode(frame):
+                                output_container.mux(out_packet)
+
+                for pkt in output_vs.encode():
+                    output_container.mux(pkt)
+                if output_audio:
+                    for pkt in output_audio.encode():
+                        output_container.mux(pkt)
+
+                input_container.close()
+                output_container.close()
+
+                if os.path.exists(out_path) and os.path.getsize(out_path) > 1000:
+                    try:
+                        backup = f"{file_path}.backup"
+                        shutil.move(file_path, backup)
+                        shutil.move(out_path, file_path)
+                        try:
+                            os.remove(backup)
+                        except Exception:
+                            pass
+                        return True, file_path
+                    except Exception as e:
+                        return False, f"Failed to replace original after PyAV rotate: {e}"
+            except Exception as e:
+                logging.debug(f"PyAV portrait enforcement error: {e}", exc_info=True)
+
+        return False, "No available method to rotate video or rotation not needed"
+    except Exception as e:
+        logging.error(f"Error in enforce_portrait_video: {e}", exc_info=True)
+        return False, str(e)
 
 def convert_hevc_to_h264(input_path, output_path=None, max_attempts=3, failed_dir_path="downloads/failed_conversions"):
     """Convert any video to H.264 for better compatibility using PyAV, with VLC fallback."""
@@ -706,8 +967,13 @@ def merge_video_overlay(main_video_path, overlay_image_path, output_path):
         return False, str(e)
 
 
-def process_zip_overlay(zip_path, output_dir):
+def process_zip_overlay(zip_path, output_dir, date_obj=None):
     """Extract ZIP to a temp directory, find -main/-overlay pairs, merge them, and save -merged files to output_dir.
+
+    Args:
+        zip_path: Path to the ZIP file
+        output_dir: Directory to save merged files
+        date_obj: Optional datetime object from memories_history.json for accurate filenames
 
     Returns a list of merged file paths.
     """
@@ -768,13 +1034,26 @@ def process_zip_overlay(zip_path, output_dir):
             if is_video:
                 success, result = merge_video_overlay(str(main_path), str(overlay_path), str(output_path))
                 if success:
+                    # Attempt to ensure merged video is portrait before renaming
+                    try:
+                        rot_ok, rot_msg = enforce_portrait_video(str(output_path))
+                        if rot_ok:
+                            logging.info(f"Ensured portrait orientation for merged video: {output_path}")
+                        else:
+                            logging.warning(f"Could not enforce portrait orientation for {output_path}: {rot_msg}")
+                    except Exception as rot_err:
+                        logging.debug(f"Error enforcing portrait orientation for merged video: {rot_err}", exc_info=True)
+
                     # Rename merged file to standard date/time format and remove originals
                     try:
-                        # Use main file's modification time for timestamp when possible
-                        try:
-                            ts = datetime.fromtimestamp(main_path.stat().st_mtime)
-                        except Exception:
-                            ts = datetime.now()
+                        # Use date from memories_history.json if available, otherwise use file modification time
+                        if date_obj:
+                            ts = date_obj
+                        else:
+                            try:
+                                ts = datetime.fromtimestamp(main_path.stat().st_mtime)
+                            except Exception:
+                                ts = datetime.now()
                         date_name = ts.strftime("%Y%m%d_%H%M%S")
                         new_name = f"{date_name}{output_path.suffix}"
                         new_path = Path(output_dir) / new_name
@@ -817,11 +1096,14 @@ def process_zip_overlay(zip_path, output_dir):
                 success, result = merge_images(str(main_path), str(overlay_path), str(output_path))
                 if success:
                     try:
-                        # Use main file's modification time for timestamp when possible
-                        try:
-                            ts = datetime.fromtimestamp(main_path.stat().st_mtime)
-                        except Exception:
-                            ts = datetime.now()
+                        # Use date from memories_history.json if available, otherwise use file modification time
+                        if date_obj:
+                            ts = date_obj
+                        else:
+                            try:
+                                ts = datetime.fromtimestamp(main_path.stat().st_mtime)
+                            except Exception:
+                                ts = datetime.now()
                         date_name = ts.strftime("%Y%m%d_%H%M%S")
                         new_name = f"{date_name}{output_path.suffix}"
                         new_path = Path(output_dir) / new_name
@@ -873,10 +1155,17 @@ def process_zip_overlay(zip_path, output_dir):
                 logging.debug(f"Could not clean up temp directory: {cleanup_error}")
 
 
-def download_media(url, output_path, max_retries=3, progress_callback=None):
+def download_media(url, output_path, max_retries=3, progress_callback=None, date_obj=None):
     """Download media file from URL with retry mechanism and optional progress callback.
 
-    Returns True on success, False on failure.
+    Args:
+        url: URL to download from
+        output_path: Path to save the downloaded file
+        max_retries: Number of download attempts
+        progress_callback: Optional callback function for progress updates
+        date_obj: Optional datetime object from memories_history.json for accurate filenames
+
+    Returns (True, None) on success, (False, None) on failure, or (True, [merged_files]) if ZIP overlay was processed.
     """
     last_error = None
 
@@ -949,7 +1238,7 @@ def download_media(url, output_path, max_retries=3, progress_callback=None):
                 try:
                     if progress_callback:
                         progress_callback("Downloaded ZIP archive, processing...")
-                    merged = process_zip_overlay(write_path, str(Path(output_path).parent))
+                    merged = process_zip_overlay(write_path, str(Path(output_path).parent), date_obj)
                     if merged:
                         try:
                             os.remove(write_path)
@@ -1518,7 +1807,7 @@ class SnapchatDownloaderGUI:
                     self.log(f"  Type: {media_type}")
                     
                     # Download file
-                    download_success, merged_files = download_media(download_url, str(file_path), max_retries=self.max_retries.get(), progress_callback=self.log)
+                    download_success, merged_files = download_media(download_url, str(file_path), max_retries=self.max_retries.get(), progress_callback=self.log, date_obj=date_obj)
                     if download_success:
                         self.log("  ✓ Downloaded")
                         
@@ -1534,14 +1823,39 @@ class SnapchatDownloaderGUI:
                                 is_video = ext in ['.mp4', '.mov', '.m4v', '.avi', '.mkv']
                                 
                                 if is_video:
-                                    # Set video metadata
-                                    if HAS_MUTAGEN:
+                                    # Ensure portrait orientation for merged video
+                                    try:
+                                        rot_ok, rot_msg = enforce_portrait_video(str(merged_path))
+                                        if rot_ok:
+                                            self.log("    ✓ Ensured portrait orientation")
+                                        else:
+                                            self.log(f"    ⚠ Could not enforce portrait orientation: {rot_msg}")
+                                    except Exception as e:
+                                        self.log(f"    ⚠ Error enforcing portrait orientation: {e}")
+
+                                    # Set video metadata - try ffmpeg first for better compatibility, then mutagen
+                                    metadata_set = False
+                                    
+                                    # Try ffmpeg first (sets standard creation_time metadata)
+                                    try:
+                                        if set_video_metadata_ffmpeg(str(merged_path), date_obj, latitude, longitude):
+                                            self.log("    ✓ Set video metadata (ffmpeg)")
+                                            metadata_set = True
+                                    except Exception as ffmpeg_error:
+                                        self.log(f"    ℹ ffmpeg metadata setting failed, trying mutagen: {ffmpeg_error}")
+                                    
+                                    # Fall back to mutagen if ffmpeg didn't work
+                                    if not metadata_set and HAS_MUTAGEN:
                                         try:
-                                            metadata_result = set_video_metadata(str(merged_path), date_obj, latitude, longitude)
-                                            if metadata_result:
-                                                self.log("    ✓ Set video metadata")
+                                            if set_video_metadata(str(merged_path), date_obj, latitude, longitude):
+                                                self.log("    ✓ Set video metadata (mutagen)")
+                                                metadata_set = True
                                         except Exception as metadata_error:
                                             self.log(f"    ⚠ Metadata error: {metadata_error}")
+                                    
+                                    if not metadata_set:
+                                        self.log("    ℹ Video metadata not set (install ffmpeg or mutagen)")
+                                    
                                     set_file_timestamps(str(merged_path), date_obj)
                                     self.log("    ✓ Set file timestamps")
                                 else:
@@ -1608,21 +1922,45 @@ class SnapchatDownloaderGUI:
                                     # Ensure timestamps are set even if conversion crashes
                                     set_file_timestamps(str(file_path), date_obj)
                             
-                            # Try to set video metadata, but don't fail if it doesn't work
-                            if HAS_MUTAGEN:
+                            # Try to set video metadata - use ffmpeg first for better compatibility, then mutagen
+                            metadata_set = False
+                            
+                            # Try ffmpeg first (sets standard creation_time metadata)
+                            try:
+                                if set_video_metadata_ffmpeg(str(file_path), date_obj, latitude, longitude):
+                                    self.log("  ✓ Set video metadata (ffmpeg)")
+                                    metadata_set = True
+                            except Exception as ffmpeg_error:
+                                logging.debug(f"ffmpeg metadata setting failed: {ffmpeg_error}")
+                            
+                            # Fall back to mutagen if ffmpeg didn't work
+                            if not metadata_set and HAS_MUTAGEN:
                                 try:
-                                    metadata_result = set_video_metadata(str(file_path), date_obj, latitude, longitude)
-                                    if metadata_result:
-                                        self.log("  ✓ Set video metadata")
-                                    else:
-                                        self.log("  ℹ Video downloaded (metadata setting skipped to preserve file integrity)")
+                                    if set_video_metadata(str(file_path), date_obj, latitude, longitude):
+                                        self.log("  ✓ Set video metadata (mutagen)")
+                                        metadata_set = True
                                 except Exception as metadata_error:
                                     self.log(f"  ⚠ Metadata error: {metadata_error}")
-                            else:
-                                self.log("  ℹ Video downloaded (install mutagen for metadata support)")
+                            
+                            if not metadata_set:
+                                self.log("  ℹ Video downloaded (install ffmpeg or mutagen for embedded metadata)")
                         
                         # ALWAYS set file timestamps as final step for any media type
                         # This ensures the creation/modification date is correct even if other metadata fails
+                        # Ensure portrait orientation for videos before finalizing timestamps/metadata
+                        try:
+                            if media_type == "Video":
+                                try:
+                                    rot_ok, rot_msg = enforce_portrait_video(str(file_path))
+                                    if rot_ok:
+                                        self.log("  ✓ Ensured portrait orientation")
+                                    else:
+                                        self.log(f"  ⚠ Could not enforce portrait orientation: {rot_msg}")
+                                except Exception as e:
+                                    self.log(f"  ⚠ Error enforcing portrait orientation: {e}")
+                        except Exception:
+                            pass
+
                         try:
                             set_file_timestamps(str(file_path), date_obj)
                             self.log("  ✓ File date set correctly")
