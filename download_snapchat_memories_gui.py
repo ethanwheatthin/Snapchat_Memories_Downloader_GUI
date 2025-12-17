@@ -623,6 +623,7 @@ def enforce_portrait_video(file_path, timeout=300):
             except Exception as e:
                 logging.debug(f"ffmpeg portrait enforcement error: {e}", exc_info=True)
 
+
         # Fallback to PyAV if available
         if HAS_PYAV:
             try:
