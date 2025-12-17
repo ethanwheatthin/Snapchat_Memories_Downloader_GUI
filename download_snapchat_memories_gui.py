@@ -529,6 +529,167 @@ def set_file_timestamps(file_path, date_obj):
     except Exception:
         pass
 
+
+def enforce_portrait_video(file_path, timeout=300):
+    """Ensure the video is portrait (height >= width).
+
+    Attempts to physically rotate the video when necessary using ffmpeg (preferred)
+    or PyAV as a fallback. Returns (True, path) on success or (False, message) on failure.
+    """
+    try:
+        if not os.path.exists(file_path):
+            return False, "File not found"
+
+        # Try ffprobe/ffmpeg first
+        if check_ffmpeg():
+            try:
+                cmd = [
+                    'ffprobe', '-v', 'error', '-select_streams', 'v:0',
+                    '-show_entries', 'stream=width,height:stream_tags=rotate',
+                    '-of', 'json', file_path
+                ]
+                res = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+                info = json.loads(res.stdout) if res.stdout else {}
+                streams = info.get('streams', [])
+                if streams:
+                    s = streams[0]
+                    width = int(s.get('width', 0))
+                    height = int(s.get('height', 0))
+                    tags = s.get('tags') or {}
+                    rotate_tag = tags.get('rotate') if tags else None
+
+                    need_rotate = False
+                    vf = None
+
+                    if rotate_tag is not None:
+                        try:
+                            r = int(rotate_tag) % 360
+                            if r == 90:
+                                need_rotate = True
+                                vf = 'transpose=1'
+                            elif r == 270:
+                                need_rotate = True
+                                vf = 'transpose=2'
+                            elif r == 180:
+                                need_rotate = True
+                                vf = 'transpose=1,transpose=1'
+                        except Exception:
+                            pass
+                    else:
+                        # No rotate tag - check frame dimensions
+                        if width > height:
+                            need_rotate = True
+                            vf = 'transpose=1'
+
+                    if not need_rotate:
+                        return True, "Already portrait"
+
+                    out_path = f"{file_path}.rotated{Path(file_path).suffix}"
+                    ffmpeg_cmd = [
+                        'ffmpeg', '-y', '-i', file_path,
+                        '-vf', vf,
+                        '-c:v', 'libx264', '-crf', '18', '-preset', 'veryfast',
+                        '-c:a', 'copy', out_path
+                    ]
+                    proc = subprocess.run(ffmpeg_cmd, capture_output=True, text=True, timeout=timeout)
+                    if proc.returncode == 0 and os.path.exists(out_path) and os.path.getsize(out_path) > 1000:
+                        # Replace original with rotated
+                        try:
+                            backup = f"{file_path}.backup"
+                            shutil.move(file_path, backup)
+                            shutil.move(out_path, file_path)
+                            try:
+                                os.remove(backup)
+                            except Exception:
+                                pass
+                            return True, file_path
+                        except Exception as e:
+                            # Try to restore
+                            try:
+                                if os.path.exists(backup) and not os.path.exists(file_path):
+                                    shutil.move(backup, file_path)
+                            except Exception:
+                                pass
+                            if os.path.exists(out_path):
+                                os.remove(out_path)
+                            return False, f"Failed to replace original: {e}"
+                    else:
+                        if os.path.exists(out_path):
+                            try:
+                                os.remove(out_path)
+                            except Exception:
+                                pass
+                        return False, f"ffmpeg failed: {proc.stderr}"
+            except Exception as e:
+                logging.debug(f"ffmpeg portrait enforcement error: {e}", exc_info=True)
+
+        # Fallback to PyAV if available
+        if HAS_PYAV:
+            try:
+                input_container = av.open(file_path)
+                vstream = input_container.streams.video[0]
+                width = vstream.width
+                height = vstream.height
+                need_rotate = width > height
+                if not need_rotate:
+                    input_container.close()
+                    return True, "Already portrait"
+
+                out_path = f"{file_path}.rotated{Path(file_path).suffix}"
+                output_container = av.open(out_path, 'w')
+                output_vs = output_container.add_stream('h264', rate=vstream.average_rate)
+                output_vs.width = height
+                output_vs.height = width
+                output_vs.pix_fmt = 'yuv420p'
+
+                output_audio = None
+                if input_container.streams.audio:
+                    audio_stream = input_container.streams.audio[0]
+                    output_audio = output_container.add_stream('aac', rate=audio_stream.rate)
+                    if hasattr(audio_stream, 'layout') and audio_stream.layout:
+                        output_audio.layout = audio_stream.layout
+
+                for packet in input_container.demux():
+                    if packet.stream.type == 'video':
+                        for frame in packet.decode():
+                            img = frame.to_image().rotate(90, expand=True)
+                            new_frame = av.VideoFrame.from_image(img)
+                            for out_packet in output_vs.encode(new_frame):
+                                output_container.mux(out_packet)
+                    elif packet.stream.type == 'audio' and output_audio:
+                        for frame in packet.decode():
+                            for out_packet in output_audio.encode(frame):
+                                output_container.mux(out_packet)
+
+                for pkt in output_vs.encode():
+                    output_container.mux(pkt)
+                if output_audio:
+                    for pkt in output_audio.encode():
+                        output_container.mux(pkt)
+
+                input_container.close()
+                output_container.close()
+
+                if os.path.exists(out_path) and os.path.getsize(out_path) > 1000:
+                    try:
+                        backup = f"{file_path}.backup"
+                        shutil.move(file_path, backup)
+                        shutil.move(out_path, file_path)
+                        try:
+                            os.remove(backup)
+                        except Exception:
+                            pass
+                        return True, file_path
+                    except Exception as e:
+                        return False, f"Failed to replace original after PyAV rotate: {e}"
+            except Exception as e:
+                logging.debug(f"PyAV portrait enforcement error: {e}", exc_info=True)
+
+        return False, "No available method to rotate video or rotation not needed"
+    except Exception as e:
+        logging.error(f"Error in enforce_portrait_video: {e}", exc_info=True)
+        return False, str(e)
+
 def convert_hevc_to_h264(input_path, output_path=None, max_attempts=3, failed_dir_path="downloads/failed_conversions"):
     """Convert any video to H.264 for better compatibility using PyAV, with VLC fallback."""
     if not HAS_PYAV:
@@ -872,6 +1033,16 @@ def process_zip_overlay(zip_path, output_dir, date_obj=None):
             if is_video:
                 success, result = merge_video_overlay(str(main_path), str(overlay_path), str(output_path))
                 if success:
+                    # Attempt to ensure merged video is portrait before renaming
+                    try:
+                        rot_ok, rot_msg = enforce_portrait_video(str(output_path))
+                        if rot_ok:
+                            logging.info(f"Ensured portrait orientation for merged video: {output_path}")
+                        else:
+                            logging.warning(f"Could not enforce portrait orientation for {output_path}: {rot_msg}")
+                    except Exception as rot_err:
+                        logging.debug(f"Error enforcing portrait orientation for merged video: {rot_err}", exc_info=True)
+
                     # Rename merged file to standard date/time format and remove originals
                     try:
                         # Use date from memories_history.json if available, otherwise use file modification time
@@ -1651,6 +1822,16 @@ class SnapchatDownloaderGUI:
                                 is_video = ext in ['.mp4', '.mov', '.m4v', '.avi', '.mkv']
                                 
                                 if is_video:
+                                    # Ensure portrait orientation for merged video
+                                    try:
+                                        rot_ok, rot_msg = enforce_portrait_video(str(merged_path))
+                                        if rot_ok:
+                                            self.log("    ✓ Ensured portrait orientation")
+                                        else:
+                                            self.log(f"    ⚠ Could not enforce portrait orientation: {rot_msg}")
+                                    except Exception as e:
+                                        self.log(f"    ⚠ Error enforcing portrait orientation: {e}")
+
                                     # Set video metadata - try ffmpeg first for better compatibility, then mutagen
                                     metadata_set = False
                                     
@@ -1765,6 +1946,20 @@ class SnapchatDownloaderGUI:
                         
                         # ALWAYS set file timestamps as final step for any media type
                         # This ensures the creation/modification date is correct even if other metadata fails
+                        # Ensure portrait orientation for videos before finalizing timestamps/metadata
+                        try:
+                            if media_type == "Video":
+                                try:
+                                    rot_ok, rot_msg = enforce_portrait_video(str(file_path))
+                                    if rot_ok:
+                                        self.log("  ✓ Ensured portrait orientation")
+                                    else:
+                                        self.log(f"  ⚠ Could not enforce portrait orientation: {rot_msg}")
+                                except Exception as e:
+                                    self.log(f"  ⚠ Error enforcing portrait orientation: {e}")
+                        except Exception:
+                            pass
+
                         try:
                             set_file_timestamps(str(file_path), date_obj)
                             self.log("  ✓ File date set correctly")
