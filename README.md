@@ -15,6 +15,7 @@ A user-friendly desktop application to download and preserve your Snapchat memor
 - [VLC Media Player](https://www.videolan.org/)
 - [FFmpeg](https://www.ffmpeg.org/download.html)
 
+
 ## 📋 Overview
 
 This tool helps you download all your Snapchat memories using the `memories_history.json` file from your Snapchat data export. It preserves important metadata like creation dates, timestamps, and GPS coordinates by embedding them directly into the downloaded media files.
