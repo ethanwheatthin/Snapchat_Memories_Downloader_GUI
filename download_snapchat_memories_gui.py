@@ -67,219 +67,45 @@ logging.basicConfig(
 
 # ==================== Core Functions (from original script) ====================
 
+# --- Delegated to refactored utility module ---
+import snap_utils, exif_utils, video_utils, zip_utils, downloader
+
 def parse_date(date_str):
-    """Parse date string from JSON format to datetime object."""
-    return datetime.strptime(date_str, "%Y-%m-%d %H:%M:%S UTC")
+    """Parse date string from JSON format to datetime object. Delegates to snap_utils."""
+    return snap_utils.parse_date(date_str)
 
 def parse_location(location_str):
-    """Parse location string to get latitude and longitude."""
-    if not location_str or location_str == "N/A":
-        return None, None
-    
-    try:
-        coords = location_str.split(": ")[1]
-        lat, lon = coords.split(", ")
-        return float(lat), float(lon)
-    except:
-        return None, None
+    """Parse location string to get latitude and longitude. Delegates to snap_utils."""
+    return snap_utils.parse_location(location_str)
 
 def decimal_to_dms(decimal):
-    """Convert decimal degrees to degrees, minutes, seconds format for EXIF."""
-    is_positive = decimal >= 0
-    decimal = abs(decimal)
-    
-    degrees = int(decimal)
-    minutes = int((decimal - degrees) * 60)
-    seconds = ((decimal - degrees) * 60 - minutes) * 60
-    
-    return ((degrees, 1), (minutes, 1), (int(seconds * 100), 100))
+    """Convert decimal degrees to degrees, minutes, seconds format for EXIF. Delegates to snap_utils."""
+    return snap_utils.decimal_to_dms(decimal)
+
 
 def set_image_exif_metadata(file_path, date_obj, latitude, longitude):
-    """Set EXIF metadata for image files."""
-    if not HAS_PIEXIF:
-        return
-    
-    try:
-        try:
-            img = Image.open(file_path)
-            img_format = img.format
-            img.close()
-        except Exception:
-            return
-        
-        if img_format not in ['JPEG', 'JPG']:
-            return
-        
-        try:
-            exif_dict = piexif.load(file_path)
-        except:
-            exif_dict = {"0th": {}, "Exif": {}, "GPS": {}, "1st": {}, "thumbnail": None}
-        
-        date_str = date_obj.strftime("%Y:%m:%d %H:%M:%S").encode('ascii')
-        exif_dict["Exif"][piexif.ExifIFD.DateTimeOriginal] = date_str
-        exif_dict["Exif"][piexif.ExifIFD.DateTimeDigitized] = date_str
-        exif_dict["0th"][piexif.ImageIFD.DateTime] = date_str
-        
-        if latitude is not None and longitude is not None:
-            lat_dms = decimal_to_dms(latitude)
-            lon_dms = decimal_to_dms(longitude)
-            
-            exif_dict["GPS"][piexif.GPSIFD.GPSLatitude] = lat_dms
-            exif_dict["GPS"][piexif.GPSIFD.GPSLatitudeRef] = b"N" if latitude >= 0 else b"S"
-            exif_dict["GPS"][piexif.GPSIFD.GPSLongitude] = lon_dms
-            exif_dict["GPS"][piexif.GPSIFD.GPSLongitudeRef] = b"E" if longitude >= 0 else b"W"
-        
-        exif_bytes = piexif.dump(exif_dict)
-        img = Image.open(file_path)
-        img.save(file_path, "JPEG", exif=exif_bytes, quality=95)
-        img.close()
-        
-    except Exception:
-        pass
+    """Set EXIF metadata for image files. Delegates to exif_utils."""
+    return exif_utils.set_image_exif_metadata(file_path, date_obj, latitude, longitude)
 
 def check_ffmpeg():
-    """Check if ffmpeg is available on the system."""
-    return shutil.which('ffmpeg') is not None
+    """Check if ffmpeg is available on the system. Delegates to video_utils."""
+    return video_utils.check_ffmpeg()
 
 def check_vlc():
-    """Check if VLC Python bindings are available."""
-    return HAS_VLC
+    """Check if VLC Python bindings are available. Delegates to video_utils."""
+    return video_utils.check_vlc()
 
 def find_vlc_executable():
-    """Find VLC executable on the system."""
-    # Common VLC installation paths on Windows
-    vlc_paths = [
-        r"C:\Program Files\VideoLAN\VLC\vlc.exe",
-        r"C:\Program Files (x86)\VideoLAN\VLC\vlc.exe",
-    ]
-    
-    # Check if VLC is in PATH
-    vlc_in_path = shutil.which('vlc')
-    if vlc_in_path:
-        return vlc_in_path
-    
-    # Check common installation paths
-    for path in vlc_paths:
-        if os.path.exists(path):
-            return path
-    
-    return None
+    """Find VLC executable on the system. Delegates to video_utils."""
+    return video_utils.find_vlc_executable()
 
 def convert_with_vlc(input_path, output_path=None):
-    """Convert video using VLC - tries Python bindings first, then subprocess."""
-    if output_path is None:
-        base, ext = os.path.splitext(input_path)
-        output_path = f"{base}_converted{ext}"
-    
-    # Try Python VLC bindings first if available
-    if HAS_VLC:
-        try:
-            return convert_with_vlc_python(input_path, output_path)
-        except Exception as e:
-            logging.warning(f"python-vlc failed: {e}. Trying subprocess method...")
-    
-    # Fall back to subprocess method
-    return convert_with_vlc_subprocess(input_path, output_path)
+    """Convert video using VLC - delegated to video_utils."""
+    return video_utils.convert_with_vlc(input_path, output_path)
 
 def convert_with_vlc_python(input_path, output_path):
-    """Convert video using VLC Python bindings."""
-    try:
-        logging.info(f"Converting with VLC (Python bindings): {input_path}")
-        
-        # Create VLC instance
-        instance = vlc.Instance('--no-xlib')
-        
-        # Create media player
-        player = instance.media_player_new()
-        media = instance.media_new(input_path)
-        
-        # Set up transcoding options matching VLC GUI: Video - H.264 + MP3 (MP4)
-        transcode_options = (
-            f"#transcode{{"
-            f"vcodec=h264,"
-            f"vb=2000,"  # Video bitrate in kb/s
-            f"venc=x264{{"
-                f"preset=medium,"
-                f"profile=main"
-            f"}},"
-            f"acodec=mp3,"
-            f"ab=192,"  # Audio bitrate in kb/s
-            f"channels=2,"
-            f"samplerate=44100"
-            f"}}:"
-            f"standard{{"
-                f"access=file,"
-                f"mux=mp4,"
-                f"dst={output_path}"
-            f"}}"
-        )
-        
-        # Add sout option to media
-        media.add_option(f":sout={transcode_options}")
-        media.add_option(":sout-keep")
-        
-        player.set_media(media)
-        
-        # Start playback (which triggers conversion)
-        player.play()
-        
-        # Wait for conversion to complete
-        import time
-        timeout = 300  # 5 minutes
-        start_time = time.time()
-        
-        while time.time() - start_time < timeout:
-            state = player.get_state()
-            
-            # Check if finished or error
-            if state == vlc.State.Ended:
-                logging.info("VLC conversion completed")
-                break
-            elif state == vlc.State.Error:
-                logging.error("VLC conversion encountered an error")
-                player.stop()
-                return False, "VLC conversion error"
-            elif state == vlc.State.Stopped:
-                # Check if output file exists and has content
-                if os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
-                    logging.info("VLC conversion stopped - checking output")
-                    break
-                else:
-                    logging.error("VLC conversion stopped prematurely")
-                    return False, "VLC conversion stopped"
-            
-            time.sleep(0.5)
-        else:
-            # Timeout reached
-            logging.error("VLC conversion timed out")
-            player.stop()
-            if os.path.exists(output_path):
-                os.remove(output_path)
-            return False, "VLC conversion timed out"
-        
-        # Stop player and release resources
-        player.stop()
-        player.release()
-        media.release()
-        
-        # Verify output file
-        if os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
-            logging.info(f"VLC conversion successful: {output_path}")
-            return True, output_path
-        else:
-            logging.error("VLC conversion failed - output file not created or too small")
-            if os.path.exists(output_path):
-                os.remove(output_path)
-            return False, "VLC conversion failed"
-            
-    except Exception as e:
-        logging.error(f"VLC Python conversion error: {e}", exc_info=True)
-        if os.path.exists(output_path):
-            try:
-                os.remove(output_path)
-            except:
-                pass
-        raise
+    """Convert video using VLC Python bindings - delegated to video_utils."""
+    return video_utils.convert_with_vlc_python(input_path, output_path)
 
 def convert_with_vlc_subprocess(input_path, output_path):
     """Convert video using VLC command-line interface via subprocess."""
@@ -347,7 +173,7 @@ def convert_with_vlc_subprocess(input_path, output_path):
                 os.remove(output_path)
             except:
                 pass
-        return False, "VLC conversion timed out"
+        return video_utils.convert_with_vlc_subprocess(input_path, output_path)
     except Exception as e:
         logging.error(f"VLC subprocess conversion error: {e}", exc_info=True)
         if os.path.exists(output_path):
@@ -355,539 +181,40 @@ def convert_with_vlc_subprocess(input_path, output_path):
                 os.remove(output_path)
             except:
                 pass
-        return False, str(e)
+        return video_utils.convert_with_vlc_subprocess(input_path, output_path)
 
 def set_video_metadata(file_path, date_obj, latitude, longitude):
-    """Set metadata for video files using mutagen (no ffmpeg required).
-    
-    Sets standard QuickTime metadata tags that are recognized by galleries and video players:
-    - Creation date (©day tag and file timestamps)
-    - Location data (when available)
-    """
-    if not HAS_MUTAGEN:
-        return False
-    
-    # Create backup before attempting to modify
-    backup_path = f"{file_path}.backup"
-    
-    try:
-        # Validate it's a proper MP4 file first
-        with open(file_path, 'rb') as f:
-            header = f.read(12)
-            # Check for valid MP4/MOV signatures (ftyp box)
-            if len(header) < 8 or header[4:8] not in [b'ftyp', b'mdat', b'moov']:
-                return False
-        
-        # Create backup
-        shutil.copy2(file_path, backup_path)
-        
-        try:
-            video = MP4(file_path)
-            
-            # Set creation date using multiple standard tags for better compatibility
-            # ISO 8601 format for ©day tag
-            creation_time = date_obj.strftime("%Y-%m-%dT%H:%M:%SZ")
-            video["\xa9day"] = creation_time  # Standard QuickTime date tag
-            
-            # Some players also recognize these tags
-            # Add creation date in various formats for maximum compatibility
-            try:
-                # Store as year for sorting/grouping
-                video["\xa9ART"] = date_obj.strftime("%Y")  # Year as artist field (some apps use this)
-            except Exception:
-                pass
-            
-            # Add location if available (using custom tags)
-            if latitude is not None and longitude is not None:
-                # Store as ISO 6709 format string
-                location_str = f"{latitude:+.6f}{longitude:+.6f}/"
-                video["----:com.apple.quicktime:location-ISO6709"] = location_str.encode('utf-8')
-                
-                # Also store individual coordinates
-                video["----:com.apple.quicktime:latitude"] = str(latitude).encode('utf-8')
-                video["----:com.apple.quicktime:longitude"] = str(longitude).encode('utf-8')
-            
-            video.save()
-            
-            # Verify the file is still valid after save
-            with open(file_path, 'rb') as f:
-                verify_header = f.read(12)
-                if len(verify_header) < 8 or verify_header[4:8] not in [b'ftyp', b'mdat', b'moov']:
-                    # Restore from backup if corrupted
-                    shutil.copy2(backup_path, file_path)
-                    os.remove(backup_path)
-                    return False
-            
-            # Success - remove backup
-            os.remove(backup_path)
-            return True
-            
-        except Exception as e:
-            # Restore from backup on any error
-            if os.path.exists(backup_path):
-                shutil.copy2(backup_path, file_path)
-                os.remove(backup_path)
-            return False
-        
-    except Exception:
-        # Clean up backup if it exists
-        if os.path.exists(backup_path):
-            os.remove(backup_path)
-        return False
+    """Set metadata for video files. Delegates to video_utils."""
+    return video_utils.set_video_metadata(file_path, date_obj, latitude, longitude)
 
 def set_video_metadata_ffmpeg(file_path, date_obj, latitude, longitude):
-    """Set video metadata using ffmpeg if available.
-    
-    This method sets standard metadata tags that are widely recognized by gallery apps:
-    - creation_time: Standard MP4 creation time metadata
-    - location: GPS coordinates if available (ISO 6709 format)
-    
-    Returns True if ffmpeg is available and metadata was set, False otherwise.
-    """
-    if not check_ffmpeg():
-        return False
-    
-    temp_output = None
-    try:
-        # Create a temporary output file
-        temp_output = f"{file_path}.temp.mp4"
-        
-        # Format creation time in ISO 8601 format as required by ffmpeg
-        creation_time_str = date_obj.strftime("%Y-%m-%dT%H:%M:%S")
-        
-        # Build ffmpeg command to copy video/audio streams and add metadata
-        cmd = [
-            'ffmpeg', '-y',
-            '-i', str(file_path),
-            '-c', 'copy',  # Copy streams without re-encoding
-            '-metadata', f'creation_time={creation_time_str}',
-            '-metadata', f'date={creation_time_str}',
-        ]
-        
-        # Add location metadata if available (ISO 6709 format: ±DD.DDDD±DDD.DDDD/)
-        if latitude is not None and longitude is not None:
-            cmd.extend([
-                '-metadata', f'location={latitude:+.6f}{longitude:+.6f}/',
-                '-metadata', f'location-eng={latitude}, {longitude}',
-            ])
-        
-        cmd.append(str(temp_output))
-        
-        logging.debug(f"Setting video metadata with ffmpeg: {' '.join(cmd)}")
-        
-        # Run ffmpeg
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=60
-        )
-        
-        if result.returncode == 0 and os.path.exists(temp_output):
-            # Replace original file with the one that has metadata
-            try:
-                os.remove(file_path)
-                os.rename(temp_output, file_path)
-                logging.info(f"Successfully set video metadata using ffmpeg: {file_path}")
-                return True
-            except Exception as e:
-                logging.error(f"Failed to replace file after metadata update: {e}")
-                # Clean up temp file
-                if os.path.exists(temp_output):
-                    os.remove(temp_output)
-                return False
-        else:
-            logging.warning(f"ffmpeg metadata setting failed: {result.stderr}")
-            # Clean up temp file if it exists
-            if os.path.exists(temp_output):
-                os.remove(temp_output)
-            return False
-            
-    except subprocess.TimeoutExpired:
-        logging.error("ffmpeg metadata setting timed out")
-        if temp_output and os.path.exists(temp_output):
-            try:
-                os.remove(temp_output)
-            except:
-                pass
-        return False
-    except Exception as e:
-        logging.error(f"Error setting video metadata with ffmpeg: {e}", exc_info=True)
-        if temp_output and os.path.exists(temp_output):
-            try:
-                os.remove(temp_output)
-            except:
-                pass
-        return False
+    """Set video metadata using ffmpeg if available. Delegates to video_utils."""
+    return video_utils.set_video_metadata_ffmpeg(file_path, date_obj, latitude, longitude)
 
 def set_file_timestamps(file_path, date_obj):
-    """Set file modification and access times."""
-    timestamp = date_obj.timestamp()
-    
-    try:
-        os.utime(file_path, (timestamp, timestamp))
-    except Exception:
-        pass
+    """Set file modification and access times. Delegates to snap_utils."""
+    return snap_utils.set_file_timestamps(file_path, date_obj)
 
 
 def enforce_portrait_video(file_path, timeout=300):
-    """Ensure the video is portrait (height >= width).
-
-    Attempts to physically rotate the video when necessary using ffmpeg (preferred)
-    or PyAV as a fallback. Returns (True, path) on success or (False, message) on failure.
-    """
-    try:
-        if not os.path.exists(file_path):
-            return False, "File not found"
-
-        # Try ffprobe/ffmpeg first
-        if check_ffmpeg():
-            try:
-                cmd = [
-                    'ffprobe', '-v', 'error', '-select_streams', 'v:0',
-                    '-show_entries', 'stream=width,height:stream_tags=rotate',
-                    '-of', 'json', file_path
-                ]
-                res = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
-                info = json.loads(res.stdout) if res.stdout else {}
-                streams = info.get('streams', [])
-                if streams:
-                    s = streams[0]
-                    width = int(s.get('width', 0))
-                    height = int(s.get('height', 0))
-                    tags = s.get('tags') or {}
-                    rotate_tag = tags.get('rotate') if tags else None
-
-                    need_rotate = False
-                    vf = None
-
-                    if rotate_tag is not None:
-                        try:
-                            r = int(rotate_tag) % 360
-                            if r == 90:
-                                need_rotate = True
-                                vf = 'transpose=1'
-                            elif r == 270:
-                                need_rotate = True
-                                vf = 'transpose=2'
-                            elif r == 180:
-                                need_rotate = True
-                                vf = 'transpose=1,transpose=1'
-                        except Exception:
-                            pass
-                    else:
-                        # No rotate tag - check frame dimensions
-                        if width > height:
-                            need_rotate = True
-                            vf = 'transpose=1'
-
-                    if not need_rotate:
-                        return True, "Already portrait"
-
-                    out_path = f"{file_path}.rotated{Path(file_path).suffix}"
-                    ffmpeg_cmd = [
-                        'ffmpeg', '-y', '-i', file_path,
-                        '-vf', vf,
-                        '-c:v', 'libx264', '-crf', '18', '-preset', 'veryfast',
-                        '-c:a', 'copy', out_path
-                    ]
-                    proc = subprocess.run(ffmpeg_cmd, capture_output=True, text=True, timeout=timeout)
-                    if proc.returncode == 0 and os.path.exists(out_path) and os.path.getsize(out_path) > 1000:
-                        # Replace original with rotated
-                        try:
-                            backup = f"{file_path}.backup"
-                            shutil.move(file_path, backup)
-                            shutil.move(out_path, file_path)
-                            try:
-                                os.remove(backup)
-                            except Exception:
-                                pass
-                            return True, file_path
-                        except Exception as e:
-                            # Try to restore
-                            try:
-                                if os.path.exists(backup) and not os.path.exists(file_path):
-                                    shutil.move(backup, file_path)
-                            except Exception:
-                                pass
-                            if os.path.exists(out_path):
-                                os.remove(out_path)
-                            return False, f"Failed to replace original: {e}"
-                    else:
-                        if os.path.exists(out_path):
-                            try:
-                                os.remove(out_path)
-                            except Exception:
-                                pass
-                        return False, f"ffmpeg failed: {proc.stderr}"
-            except Exception as e:
-                logging.debug(f"ffmpeg portrait enforcement error: {e}", exc_info=True)
-
-
-        # Fallback to PyAV if available
-        if HAS_PYAV:
-            try:
-                input_container = av.open(file_path)
-                vstream = input_container.streams.video[0]
-                width = vstream.width
-                height = vstream.height
-                need_rotate = width > height
-                if not need_rotate:
-                    input_container.close()
-                    return True, "Already portrait"
-
-                out_path = f"{file_path}.rotated{Path(file_path).suffix}"
-                output_container = av.open(out_path, 'w')
-                output_vs = output_container.add_stream('h264', rate=vstream.average_rate)
-                output_vs.width = height
-                output_vs.height = width
-                output_vs.pix_fmt = 'yuv420p'
-
-                output_audio = None
-                if input_container.streams.audio:
-                    audio_stream = input_container.streams.audio[0]
-                    output_audio = output_container.add_stream('aac', rate=audio_stream.rate)
-                    if hasattr(audio_stream, 'layout') and audio_stream.layout:
-                        output_audio.layout = audio_stream.layout
-
-                for packet in input_container.demux():
-                    if packet.stream.type == 'video':
-                        for frame in packet.decode():
-                            img = frame.to_image().rotate(90, expand=True)
-                            new_frame = av.VideoFrame.from_image(img)
-                            for out_packet in output_vs.encode(new_frame):
-                                output_container.mux(out_packet)
-                    elif packet.stream.type == 'audio' and output_audio:
-                        for frame in packet.decode():
-                            for out_packet in output_audio.encode(frame):
-                                output_container.mux(out_packet)
-
-                for pkt in output_vs.encode():
-                    output_container.mux(pkt)
-                if output_audio:
-                    for pkt in output_audio.encode():
-                        output_container.mux(pkt)
-
-                input_container.close()
-                output_container.close()
-
-                if os.path.exists(out_path) and os.path.getsize(out_path) > 1000:
-                    try:
-                        backup = f"{file_path}.backup"
-                        shutil.move(file_path, backup)
-                        shutil.move(out_path, file_path)
-                        try:
-                            os.remove(backup)
-                        except Exception:
-                            pass
-                        return True, file_path
-                    except Exception as e:
-                        return False, f"Failed to replace original after PyAV rotate: {e}"
-            except Exception as e:
-                logging.debug(f"PyAV portrait enforcement error: {e}", exc_info=True)
-
-        return False, "No available method to rotate video or rotation not needed"
-    except Exception as e:
-        logging.error(f"Error in enforce_portrait_video: {e}", exc_info=True)
-        return False, str(e)
+    """Ensure the video is portrait (height >= width). Delegates to video_utils."""
+    return video_utils.enforce_portrait_video(file_path, timeout)
 
 def convert_hevc_to_h264(input_path, output_path=None, max_attempts=3, failed_dir_path="downloads/failed_conversions"):
-    """Convert any video to H.264 for better compatibility using PyAV, with VLC fallback."""
-    if not HAS_PYAV:
-        logging.warning("PyAV not installed. Attempting VLC fallback...")
-        # Try VLC as fallback
-        return convert_with_vlc(input_path, output_path)
-
-    if output_path is None:
-        base, ext = os.path.splitext(input_path)
-        output_path = f"{base}_temp{ext}"
-
-    attempt = 0
-    while attempt < max_attempts:
-        attempt += 1
-        input_container = None
-        output_container = None
-        try:
-            logging.info(f"Attempt {attempt}: Opening input video: {input_path}")
-            input_container = av.open(input_path)
-            input_video_stream = input_container.streams.video[0]
-
-            # Always convert to H.264 regardless of the input codec
-            logging.info(f"Attempt {attempt}: Creating output container: {output_path}")
-            output_container = av.open(output_path, 'w')
-
-            # Add video stream with H.264 codec
-            output_video_stream = output_container.add_stream('h264', rate=input_video_stream.average_rate)
-            output_video_stream.width = input_video_stream.width
-            output_video_stream.height = input_video_stream.height
-            output_video_stream.pix_fmt = 'yuv420p'
-            output_video_stream.bit_rate = input_video_stream.bit_rate or 2000000
-
-            # Copy audio stream if exists
-            audio_stream = None
-            output_audio_stream = None
-            if input_container.streams.audio:
-                audio_stream = input_container.streams.audio[0]
-                output_audio_stream = output_container.add_stream('aac', rate=audio_stream.rate)
-                if hasattr(audio_stream, 'layout') and audio_stream.layout:
-                    output_audio_stream.layout = audio_stream.layout
-
-            logging.info(f"Attempt {attempt}: Processing frames...")
-            for packet in input_container.demux():
-                if packet.stream.type == 'video':
-                    for frame in packet.decode():
-                        for out_packet in output_video_stream.encode(frame):
-                            output_container.mux(out_packet)
-                elif packet.stream.type == 'audio' and output_audio_stream:
-                    for frame in packet.decode():
-                        for out_packet in output_audio_stream.encode(frame):
-                            output_container.mux(out_packet)
-
-            logging.info(f"Attempt {attempt}: Flushing streams...")
-            for packet in output_video_stream.encode():
-                output_container.mux(packet)
-            if output_audio_stream:
-                for packet in output_audio_stream.encode():
-                    output_container.mux(packet)
-
-            logging.info(f"Attempt {attempt}: Closing containers...")
-            # Explicitly close containers before file operations
-            if input_container:
-                input_container.close()
-                input_container = None
-            if output_container:
-                output_container.close()
-                output_container = None
-
-            logging.info(f"Conversion to H.264 successful on attempt {attempt}: {output_path}")
-            return True, output_path
-
-        except Exception as e:
-            logging.error(f"Attempt {attempt}: Error during conversion: {e}", exc_info=True)
-            # Ensure containers are closed
-            try:
-                if input_container:
-                    input_container.close()
-            except:
-                pass
-            try:
-                if output_container:
-                    output_container.close()
-            except:
-                pass
-            
-            # Small delay to ensure file handles are released
-            import time
-            time.sleep(0.5)
-            
-            if os.path.exists(output_path):
-                try:
-                    os.remove(output_path)
-                    logging.info(f"Attempt {attempt}: Removed partial output: {output_path}")
-                except Exception as cleanup_error:
-                    logging.error(f"Attempt {attempt}: Failed to remove partial output {output_path}: {cleanup_error}", exc_info=True)
-
-        logging.warning(f"Attempt {attempt} failed. Retrying...")
-
-    # PyAV failed all attempts, try VLC as fallback
-    logging.info("All PyAV attempts failed. Trying VLC fallback...")
-    
-    # Add delay to ensure file handles are released
-    import time
-    time.sleep(1)
-    
-    vlc_success, vlc_result = convert_with_vlc(input_path, output_path)
-    
-    if vlc_success:
-        logging.info(f"VLC fallback conversion successful: {vlc_result}")
-        return True, vlc_result
-    
-    # Both PyAV and VLC failed - move to failed_conversions folder
-    logging.error("Both PyAV and VLC conversion methods failed")
-    
-    # Ensure delay before file operations
-    time.sleep(1)
-    
-    failed_dir = Path(failed_dir_path)
-    failed_dir.mkdir(parents=True, exist_ok=True)
-    failed_path = failed_dir / Path(input_path).name
-    
-    # Save error log with the failed file
-    error_log_path = failed_dir / f"{Path(input_path).stem}_error.txt"
-    try:
-        with open(error_log_path, 'w') as f:
-            f.write(f"Failed conversion: {input_path}\n")
-            f.write(f"PyAV result: Failed after {max_attempts} attempts\n")
-            f.write(f"VLC result: {vlc_result}\n")
-            f.write(f"Timestamp: {datetime.now().isoformat()}\n")
-        logging.info(f"Error log saved: {error_log_path}")
-    except Exception as log_error:
-        logging.error(f"Failed to save error log: {log_error}")
-    
-    try:
-        # Use copy instead of move to avoid file locking issues
-        shutil.copy2(input_path, failed_path)
-        logging.info(f"Copied failed conversion to: {failed_path}")
-        
-        # Try to remove original, but don't fail if we can't
-        try:
-            os.remove(input_path)
-            logging.info(f"Removed original file: {input_path}")
-        except Exception as remove_error:
-            logging.warning(f"Could not remove original {input_path}: {remove_error}")
-            
-    except Exception as copy_error:
-        logging.error(f"Failed to copy {input_path} to {failed_path}: {copy_error}", exc_info=True)
-
-    logging.error(f"All conversion attempts failed for {input_path}")
-    return False, f"Failed after {max_attempts} PyAV attempts and VLC fallback"
+    """Convert any video to H.264 for better compatibility. Delegates to video_utils."""
+    return video_utils.convert_hevc_to_h264(input_path, output_path, max_attempts, failed_dir_path)
 
 def extract_media_from_zip(zip_path, output_path):
-    """Extract media file from ZIP archive."""
-    temp_dir = None
-    try:
-        logging.info(f"Extracting media from ZIP: {zip_path}")
-        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-            # Get list of files in the ZIP
-            file_list = zip_ref.namelist()
-            
-            # Filter for media files (images and videos)
-            media_extensions = ('.jpg', '.jpeg', '.png', '.mp4', '.mov', '.m4v', '.heic')
-            media_files = [f for f in file_list if f.lower().endswith(media_extensions)]
-            
-            if not media_files:
-                logging.warning(f"No media files found in ZIP archive")
-                return False
-            
-            # Extract the first media file found
-            media_file = media_files[0]
-            logging.info(f"Extracting: {media_file}")
-            
-            # Extract to temporary location
-            temp_dir = Path(output_path).parent / "temp_extract"
-            temp_dir.mkdir(exist_ok=True)
-            
-            extracted_path = zip_ref.extract(media_file, temp_dir)
-            
-            # Move extracted file to desired output path
-            shutil.move(extracted_path, output_path)
-            
-            logging.info(f"Successfully extracted media to: {output_path}")
-            return True
-            
-    except zipfile.BadZipFile as e:
-        logging.warning(f"Invalid ZIP file: {zip_path} - {e}")
-        return False
-    except Exception as e:
-        logging.warning(f"Error extracting ZIP: {e}")
-        return False
-    finally:
-        # Always clean up temp directory if it exists
-        if temp_dir and temp_dir.exists():
-            try:
-                shutil.rmtree(temp_dir)
-            except Exception as cleanup_error:
-                logging.debug(f"Could not clean up temp directory: {cleanup_error}")
+    """Extract media file from ZIP archive. Delegates to zip_utils."""
+    return zip_utils.extract_media_from_zip(zip_path, output_path)
+
+def merge_images(main_img_path, overlay_img_path, output_path):
+    """Merge overlay image on top of main image and save to output_path. Delegates to zip_utils."""
+    return zip_utils.merge_images(main_img_path, overlay_img_path, output_path)
+
+def merge_video_overlay(main_video_path, overlay_image_path, output_path):
+    """Overlay an image on top of a video using ffmpeg. Delegates to zip_utils."""
+    return zip_utils.merge_video_overlay(main_video_path, overlay_image_path, output_path)
 
 def merge_images(main_img_path, overlay_img_path, output_path):
     """Merge overlay image on top of main image and save to output_path.
@@ -1380,6 +707,35 @@ def get_file_extension(media_type):
         return ".bin"
 
 # ==================== GUI Application ====================
+
+# --- Wrappers to refactored modules (override long original implementations) ---
+def extract_media_from_zip(zip_path, output_path):
+    return zip_utils.extract_media_from_zip(zip_path, output_path)
+
+
+def process_zip_overlay(zip_path, output_dir, date_obj=None):
+    return zip_utils.process_zip_overlay(zip_path, output_dir, date_obj)
+
+
+def merge_images(main_img_path, overlay_img_path, output_path):
+    return zip_utils.merge_images(main_img_path, overlay_img_path, output_path)
+
+
+def merge_video_overlay(main_video_path, overlay_image_path, output_path):
+    return zip_utils.merge_video_overlay(main_video_path, overlay_image_path, output_path)
+
+
+def download_media(url, output_path, max_retries=3, progress_callback=None, date_obj=None):
+    return downloader.download_media(url, output_path, max_retries, progress_callback, date_obj)
+
+
+def validate_downloaded_file(file_path):
+    return snap_utils.validate_downloaded_file(file_path)
+
+
+def get_file_extension(media_type):
+    return snap_utils.get_file_extension(media_type)
+
 
 class ScrollableFrame(ttk.Frame):
     """A scrollable frame that allows vertical scrolling of its content."""
