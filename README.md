@@ -1,10 +1,16 @@
 # Snapchat Memories Downloader GUI
 
+**Important — Use the official release .exe (Updated)**
+
+- **Do not download the repository ZIP.** This project now provides a pre-built Windows executable in the official GitHub Releases. If you watched an older video or followed instructions to download the ZIP, stop and download the `.exe` from the Releases page instead.
+- **Official Releases:** https://github.com/ethanwheatthin/Snapchat_Memories_Downloader_GUI/releases/tag/new_build
+- The executable is the recommended and supported distribution for most users and ensures the latest fixes and Windows compatibility.
+
 A user-friendly desktop application to download and preserve your Snapchat memories with their original metadata, including dates and location information.
 
 **Only available on Windows**
 
-**⚠️IMPORTANT DO THIS FIRST!⚠️: The tool will also attempt to reattach any overlay images back onto the original image or video when an overlay/-main pair is present in ZIP exports. ** For optimal processing of videos and captions, having VLC Media Player and FFmpeg installed on your system is highly recommended. VLC assists in smooth video playback and format conversion, while FFmpeg enhances video overlay merging. The program will attempt to reattach your captions and overlays. Having these tools helps the program ensure all media is processed. Download them here:
+⚠️IMPORTANT DO THIS FIRST!⚠️: The tool will also attempt to reattach any overlay images back onto the original image or video when an overlay/-main pair is present in ZIP exports. ** For optimal processing of videos and captions, having VLC Media Player and FFmpeg installed on your system is highly recommended. VLC assists in smooth video playback and format conversion, while FFmpeg enhances video overlay merging. The program will attempt to reattach your captions and overlays. Having these tools helps the program ensure all media is processed. Download them here:
 
 - [VLC Media Player](https://www.videolan.org/)
 - [FFmpeg](https://www.ffmpeg.org/download.html)
