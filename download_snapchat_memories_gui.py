@@ -14,6 +14,7 @@ import logging
 import zipfile
 import tempfile
 import re
+import webbrowser
 
 # For PIL and piexif: detect availability separately
 HAS_PIEXIF = False
@@ -783,7 +784,7 @@ class SnapchatDownloaderGUI:
         # Variables
         self.json_path = tk.StringVar()
         self.output_path = tk.StringVar(value="downloads")
-        self.convert_hevc = tk.BooleanVar(value=True)
+        # Conversion is automatic when tools are available; no checkbox in UI
         self.max_retries = tk.IntVar(value=3)  # Number of download attempts (initial + retries)
         self.is_downloading = False
         self.stop_download = False
@@ -923,17 +924,61 @@ class SnapchatDownloaderGUI:
                                style="Info.TLabel")
         output_info.pack(anchor=tk.W, pady=(0, 15))
         
-        # Conversion option
-        conversion_frame = ttk.Frame(input_card, style="Card.TFrame")
-        conversion_frame.pack(fill=tk.X, pady=(0, 20))
-        
-        self.convert_checkbox = ttk.Checkbutton(
-            conversion_frame, 
-            text="Convert videos to H.264 for better compatibility",
-            variable=self.convert_hevc,
-            style="Info.TLabel"
+        # Conversion tools status (ffmpeg / VLC) with install links if missing
+        tools_frame = ttk.Frame(input_card, style="Card.TFrame")
+        tools_frame.pack(fill=tk.X, pady=(0, 20))
+
+        tools_header = ttk.Label(tools_frame, text="Conversion Tools", style="Header.TLabel")
+        tools_header.pack(anchor=tk.W)
+
+        # ffmpeg status
+        ffmpeg_installed = check_ffmpeg()
+        ffmpeg_text = "✓ ffmpeg installed" if ffmpeg_installed else "⚠ ffmpeg not found — click to download"
+        ffmpeg_label = ttk.Label(tools_frame, text=ffmpeg_text, style="Info.TLabel", cursor=("hand2" if not ffmpeg_installed else "arrow"))
+        ffmpeg_label.pack(anchor=tk.W, padx=(6,0))
+        if not ffmpeg_installed:
+            ffmpeg_label.bind("<Button-1>", lambda e: webbrowser.open("https://ffmpeg.org/download.html"))
+
+        # VLC status
+        vlc_path = find_vlc_executable()
+        vlc_installed = bool(vlc_path or HAS_VLC)
+        if vlc_installed and vlc_path:
+            vlc_text = f"✓ VLC installed ({vlc_path})"
+        elif HAS_VLC:
+            vlc_text = "✓ VLC Python bindings available"
+        else:
+            vlc_text = "⚠ VLC not found — click to download"
+        vlc_label = ttk.Label(tools_frame, text=vlc_text, style="Info.TLabel", cursor=("hand2" if not vlc_installed else "arrow"))
+        vlc_label.pack(anchor=tk.W, padx=(6,0))
+        if not vlc_installed:
+            vlc_label.bind("<Button-1>", lambda e: webbrowser.open("https://www.videolan.org/vlc/"))
+
+        info_label = ttk.Label(
+            tools_frame,
+            text=("Videos will be converted to H.264 automatically when tools are available. "
+                  "ffmpeg/VLC are also used to merge Snapchat captions back onto photos or videos; "
+                  "click the links to download."),
+            style="Info.TLabel",
+            wraplength=520,
+            justify=tk.LEFT
         )
-        self.convert_checkbox.pack(anchor=tk.W)
+        info_label.pack(anchor=tk.W, pady=(6, 0))
+        # Update wraplength dynamically so the text wraps with the frame width
+        tools_frame.bind("<Configure>", lambda e: info_label.config(wraplength=max(e.width - 12, 200)))
+
+        # Small action buttons to open the download pages for ffmpeg and VLC
+        download_buttons_frame = ttk.Frame(tools_frame, style="Card.TFrame")
+        download_buttons_frame.pack(anchor=tk.W, pady=(8, 0))
+
+        ffmpeg_btn_text = "Open ffmpeg" if ffmpeg_installed else "Download ffmpeg"
+        ffmpeg_btn = ttk.Button(download_buttons_frame, text=ffmpeg_btn_text, style="Secondary.TButton", width=18,
+                                command=lambda: webbrowser.open("https://ffmpeg.org/download.html"))
+        ffmpeg_btn.pack(side=tk.LEFT, padx=(6, 8))
+
+        vlc_btn_text = "Open VLC" if vlc_installed else "Download VLC"
+        vlc_btn = ttk.Button(download_buttons_frame, text=vlc_btn_text, style="Secondary.TButton", width=18,
+                             command=lambda: webbrowser.open("https://www.videolan.org/vlc/"))
+        vlc_btn.pack(side=tk.LEFT)
         
         # Download retries option
         retries_frame = ttk.Frame(input_card, style="Card.TFrame")
@@ -952,11 +997,11 @@ class SnapchatDownloaderGUI:
         retries_info.pack(anchor=tk.W, pady=(6, 10))
 
         # Check available conversion tools and display status
-        conversion_status = self.get_conversion_status()
-        conversion_info = ttk.Label(input_card,
-                                   text=conversion_status,
-                                   style="Info.TLabel")
-        conversion_info.pack(anchor=tk.W, pady=(0, 20))
+        # conversion_status = self.get_conversion_status()
+        # conversion_info = ttk.Label(input_card,
+        #                            text=conversion_status,
+        #                            style="Info.TLabel")
+        # conversion_info.pack(anchor=tk.W, pady=(0, 20))
         
         # Buttons
         button_frame = ttk.Frame(input_card, style="Card.TFrame")
