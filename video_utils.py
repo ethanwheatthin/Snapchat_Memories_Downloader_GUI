@@ -3,7 +3,11 @@ import os
 import shutil
 import subprocess
 import time
+import sys
 from pathlib import Path
+
+# Windows-specific subprocess flag to prevent command windows from popping up
+CREATE_NO_WINDOW = 0x08000000 if sys.platform == 'win32' else 0
 
 # Optional libs
 HAS_MUTAGEN = False
@@ -135,7 +139,7 @@ def convert_with_vlc_subprocess(input_path, output_path):
     ]
 
     logging.debug(f"VLC command: {' '.join(cmd)}")
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=300, creationflags=CREATE_NO_WINDOW)
 
     if os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
         return True, output_path
@@ -147,14 +151,15 @@ def convert_with_vlc_subprocess(input_path, output_path):
 
 def set_video_metadata(file_path, date_obj, latitude, longitude):
     if not HAS_MUTAGEN:
+        logging.debug("Skipping video metadata: mutagen not available")
         return False
 
     backup_path = f"{file_path}.backup"
     try:
-        with open(file_path, 'rb') as f:
-            header = f.read(12)
-            if len(header) < 8 or header[4:8] not in [b'ftyp', b'mdat', b'moov']:
-                return False
+        # Quick sanity check: file must exist and be reasonably sized
+        if not os.path.exists(file_path):
+            logging.error("Video file does not exist: %s", file_path)
+            return False
 
         shutil.copy2(file_path, backup_path)
         try:
@@ -166,37 +171,54 @@ def set_video_metadata(file_path, date_obj, latitude, longitude):
             except Exception:
                 pass
 
+            # Add GPS metadata if available
             if latitude is not None and longitude is not None:
                 location_str = f"{latitude:+.6f}{longitude:+.6f}/"
                 video["----:com.apple.quicktime:location-ISO6709"] = location_str.encode('utf-8')
                 video["----:com.apple.quicktime:latitude"] = str(latitude).encode('utf-8')
                 video["----:com.apple.quicktime:longitude"] = str(longitude).encode('utf-8')
+                logging.info(f"Setting GPS metadata via mutagen: lat={latitude}, lon={longitude} for {file_path}")
+            else:
+                logging.info(f"No GPS data available for video (mutagen): {file_path}")
 
+            # write tags
             video.save()
 
-            with open(file_path, 'rb') as f:
-                verify_header = f.read(12)
-                if len(verify_header) < 8 or verify_header[4:8] not in [b'ftyp', b'mdat', b'moov']:
-                    shutil.copy2(backup_path, file_path)
-                    os.remove(backup_path)
-                    return False
-
-            os.remove(backup_path)
-            return True
-        except Exception:
-            if os.path.exists(backup_path):
+            # verify by attempting to load the saved file with mutagen
+            try:
+                _ = MP4(file_path)
+            except Exception as e:
+                logging.error("Mutagen failed to re-open saved file, restoring backup: %s", e)
                 shutil.copy2(backup_path, file_path)
                 os.remove(backup_path)
+                return False
+
+            os.remove(backup_path)
+            logging.info("Successfully set video metadata using mutagen: %s", file_path)
+            return True
+        except Exception as e:
+            logging.exception("Error writing mutagen metadata, restoring backup if any: %s", file_path)
+            if os.path.exists(backup_path):
+                try:
+                    shutil.copy2(backup_path, file_path)
+                    os.remove(backup_path)
+                except Exception:
+                    pass
             return False
 
     except Exception:
+        logging.exception("Unexpected error in set_video_metadata for %s", file_path)
         if os.path.exists(backup_path):
-            os.remove(backup_path)
+            try:
+                os.remove(backup_path)
+            except Exception:
+                pass
         return False
 
 
 def set_video_metadata_ffmpeg(file_path, date_obj, latitude, longitude):
     if not check_ffmpeg():
+        logging.debug("ffmpeg not available for metadata writing")
         return False
 
     temp_output = None
@@ -204,12 +226,25 @@ def set_video_metadata_ffmpeg(file_path, date_obj, latitude, longitude):
         temp_output = f"{file_path}.temp.mp4"
         creation_time_str = date_obj.strftime("%Y-%m-%dT%H:%M:%S")
         cmd = ['ffmpeg', '-y', '-i', str(file_path), '-c', 'copy', '-metadata', f'creation_time={creation_time_str}', '-metadata', f'date={creation_time_str}']
+        
+        # Add location metadata if available
         if latitude is not None and longitude is not None:
-            cmd.extend(['-metadata', f'location={latitude:+.6f}{longitude:+.6f}/', '-metadata', f'location-eng={latitude}, {longitude}'])
+            location_iso = f'{latitude:+.6f}{longitude:+.6f}/'
+            cmd.extend([
+                '-metadata', f'location={location_iso}',
+                '-metadata', f'location-eng={latitude}, {longitude}',
+                '-metadata', f'com.apple.quicktime.location.ISO6709={location_iso}',
+                '-metadata', f'com.apple.quicktime.GPS.latitude={latitude}',
+                '-metadata', f'com.apple.quicktime.GPS.longitude={longitude}'
+            ])
+            logging.info(f"Adding GPS metadata to video: lat={latitude}, lon={longitude}")
+        else:
+            logging.info(f"No GPS data available for video: {file_path}")
+        
         cmd.append(str(temp_output))
 
         logging.debug(f"Setting video metadata with ffmpeg: {' '.join(cmd)}")
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60, creationflags=CREATE_NO_WINDOW)
 
         if result.returncode == 0 and os.path.exists(temp_output):
             try:
@@ -255,7 +290,7 @@ def enforce_portrait_video(file_path, timeout=300):
                 '-show_entries', 'stream=width,height:stream_tags=rotate',
                 '-of', 'json', file_path
             ]
-            res = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=10, creationflags=CREATE_NO_WINDOW)
             import json
             info = json.loads(res.stdout) if res.stdout else {}
             streams = info.get('streams', [])
@@ -298,7 +333,7 @@ def enforce_portrait_video(file_path, timeout=300):
                     '-c:v', 'libx264', '-crf', '18', '-preset', 'veryfast',
                     '-c:a', 'copy', out_path
                 ]
-                proc = subprocess.run(ffmpeg_cmd, capture_output=True, text=True, timeout=timeout)
+                proc = subprocess.run(ffmpeg_cmd, capture_output=True, text=True, timeout=timeout, creationflags=CREATE_NO_WINDOW)
                 if proc.returncode == 0 and os.path.exists(out_path) and os.path.getsize(out_path) > 1000:
                     try:
                         backup = f"{file_path}.backup"
