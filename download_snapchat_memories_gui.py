@@ -1198,6 +1198,12 @@ class SnapchatDownloaderGUI:
                         
                     latitude, longitude = parse_location(location_str)
                     
+                    # Log location data for debugging
+                    if latitude is not None and longitude is not None:
+                        self.log(f"  📍 Location: {latitude}, {longitude}")
+                    else:
+                        self.log(f"  📍 No location data available")
+                    
                     # Generate filename
                     date_formatted = date_obj.strftime("%Y%m%d_%H%M%S")
                     extension = get_file_extension(media_type)
