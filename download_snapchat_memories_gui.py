@@ -57,11 +57,12 @@ except (ImportError, FileNotFoundError, OSError):
     HAS_VLC = False
 
 # Configure logging
+# Configure logging with UTF-8 encoding for better Windows compatibility
 logging.basicConfig(
     level=logging.DEBUG,  # Set to DEBUG for verbose logging
     format='%(asctime)s [%(levelname)s] %(message)s',
     handlers=[
-        logging.FileHandler("debug.log"),  # Log to a file
+        logging.FileHandler("debug.log", encoding='utf-8'),  # Log to a file with UTF-8
         logging.StreamHandler()  # Log to console
     ]
 )
@@ -1200,7 +1201,10 @@ class SnapchatDownloaderGUI:
                     
                     # Log location data for debugging
                     if latitude is not None and longitude is not None:
+                        lat_dir = 'N' if latitude >= 0 else 'S'
+                        lon_dir = 'E' if longitude >= 0 else 'W'
                         self.log(f"  📍 Location: {latitude}, {longitude}")
+                        self.log(f"      ({abs(latitude):.4f}° {lat_dir}, {abs(longitude):.4f}° {lon_dir})")
                     else:
                         self.log(f"  📍 No location data available")
                     
@@ -1247,6 +1251,8 @@ class SnapchatDownloaderGUI:
                                     try:
                                         if set_video_metadata_ffmpeg(str(merged_path), date_obj, latitude, longitude):
                                             self.log("    ✓ Set video metadata (ffmpeg)")
+                                            if latitude is not None and longitude is not None:
+                                                self.log("      ℹ GPS written (Windows may not display it in Properties)")
                                             metadata_set = True
                                     except Exception as ffmpeg_error:
                                         self.log(f"    ℹ ffmpeg metadata setting failed, trying mutagen: {ffmpeg_error}")
@@ -1336,6 +1342,8 @@ class SnapchatDownloaderGUI:
                             try:
                                 if set_video_metadata_ffmpeg(str(file_path), date_obj, latitude, longitude):
                                     self.log("  ✓ Set video metadata (ffmpeg)")
+                                    if latitude is not None and longitude is not None:
+                                        self.log("    ℹ GPS written (Windows may not display it in Properties)")
                                     metadata_set = True
                             except Exception as ffmpeg_error:
                                 logging.debug(f"ffmpeg metadata setting failed: {ffmpeg_error}")
@@ -1403,6 +1411,12 @@ class SnapchatDownloaderGUI:
             self.log(f"Failed: {error_count}")
             self.log(f"Total: {total}")
             self.log(f"Output: {output_dir}")
+            self.log("=" * 50)
+            self.log("")
+            self.log("ℹ Note about video GPS metadata:")
+            self.log("  Windows File Explorer doesn't show GPS for videos,")
+            self.log("  but the location data IS embedded in the file.")
+            self.log("  Run 'python verify_video_gps.py downloads/' to check.")
             self.log("=" * 50)
             
             if not self.stop_download:

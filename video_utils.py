@@ -174,12 +174,16 @@ def set_video_metadata(file_path, date_obj, latitude, longitude):
             # Add GPS metadata if available
             if latitude is not None and longitude is not None:
                 location_str = f"{latitude:+.6f}{longitude:+.6f}/"
+                # Standard location atom (most compatible)
+                video["\xa9xyz"] = location_str
+                # Additional QuickTime location tags
                 video["----:com.apple.quicktime:location-ISO6709"] = location_str.encode('utf-8')
                 video["----:com.apple.quicktime:latitude"] = str(latitude).encode('utf-8')
                 video["----:com.apple.quicktime:longitude"] = str(longitude).encode('utf-8')
-                logging.info(f"Setting GPS metadata via mutagen: lat={latitude}, lon={longitude} for {file_path}")
+                logging.info(f"Writing GPS to video via mutagen: lat={latitude}, lon={longitude}")
+                logging.debug(f"  ISO 6709 format: {location_str}")
             else:
-                logging.info(f"No GPS data available for video (mutagen): {file_path}")
+                logging.debug(f"No GPS coordinates in source data (mutagen): {file_path}")
 
             # write tags
             video.save()
@@ -230,16 +234,21 @@ def set_video_metadata_ffmpeg(file_path, date_obj, latitude, longitude):
         # Add location metadata if available
         if latitude is not None and longitude is not None:
             location_iso = f'{latitude:+.6f}{longitude:+.6f}/'
+            logging.info(f"Writing GPS to video via ffmpeg: lat={latitude}, lon={longitude}")
+            logging.info(f"  ISO 6709 format: {location_iso}")
+            logging.info(f"  Interpretation: {abs(latitude):.4f}° {'N' if latitude >= 0 else 'S'}, {abs(longitude):.4f}° {'E' if longitude >= 0 else 'W'}")
             cmd.extend([
                 '-metadata', f'location={location_iso}',
                 '-metadata', f'location-eng={latitude}, {longitude}',
                 '-metadata', f'com.apple.quicktime.location.ISO6709={location_iso}',
                 '-metadata', f'com.apple.quicktime.GPS.latitude={latitude}',
-                '-metadata', f'com.apple.quicktime.GPS.longitude={longitude}'
+                '-metadata', f'com.apple.quicktime.GPS.longitude={longitude}',
+                '-metadata', f'\xa9xyz={location_iso}'
             ])
-            logging.info(f"Adding GPS metadata to video: lat={latitude}, lon={longitude}")
+            logging.info(f"Writing GPS to video via ffmpeg: lat={latitude}, lon={longitude}")
+            logging.debug(f"  ISO 6709 format: {location_iso}")
         else:
-            logging.info(f"No GPS data available for video: {file_path}")
+            logging.debug(f"No GPS coordinates in source data for: {file_path}")
         
         cmd.append(str(temp_output))
 
@@ -250,7 +259,9 @@ def set_video_metadata_ffmpeg(file_path, date_obj, latitude, longitude):
             try:
                 os.remove(file_path)
                 os.rename(temp_output, file_path)
-                logging.info(f"Successfully set video metadata using ffmpeg: {file_path}")
+                logging.info(f"Successfully wrote video metadata using ffmpeg: {file_path}")
+                if latitude is not None and longitude is not None:
+                    logging.info(f"  Note: Windows may not display GPS for videos. Use MediaInfo/ExifTool to verify.")
                 return True
             except Exception as e:
                 logging.error(f"Failed to replace file after metadata update: {e}")

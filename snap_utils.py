@@ -15,10 +15,15 @@ def parse_location(location_str):
         return None, None
 
     try:
+        # Expected format: "Lat, Lng: 37.7749, -122.4194"
         coords = location_str.split(": ")[1]
         lat, lon = coords.split(", ")
-        return float(lat), float(lon)
-    except Exception:
+        lat_val = float(lat)
+        lon_val = float(lon)
+        logging.debug(f"Parsed location from '{location_str}': lat={lat_val}, lon={lon_val}")
+        return lat_val, lon_val
+    except Exception as e:
+        logging.warning(f"Failed to parse location '{location_str}': {e}")
         return None, None
 
 
