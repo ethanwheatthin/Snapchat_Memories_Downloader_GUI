@@ -147,14 +147,15 @@ def convert_with_vlc_subprocess(input_path, output_path):
 
 def set_video_metadata(file_path, date_obj, latitude, longitude):
     if not HAS_MUTAGEN:
+        logging.debug("Skipping video metadata: mutagen not available")
         return False
 
     backup_path = f"{file_path}.backup"
     try:
-        with open(file_path, 'rb') as f:
-            header = f.read(12)
-            if len(header) < 8 or header[4:8] not in [b'ftyp', b'mdat', b'moov']:
-                return False
+        # Quick sanity check: file must exist and be reasonably sized
+        if not os.path.exists(file_path):
+            logging.error("Video file does not exist: %s", file_path)
+            return False
 
         shutil.copy2(file_path, backup_path)
         try:
@@ -172,26 +173,38 @@ def set_video_metadata(file_path, date_obj, latitude, longitude):
                 video["----:com.apple.quicktime:latitude"] = str(latitude).encode('utf-8')
                 video["----:com.apple.quicktime:longitude"] = str(longitude).encode('utf-8')
 
+            # write tags
             video.save()
 
-            with open(file_path, 'rb') as f:
-                verify_header = f.read(12)
-                if len(verify_header) < 8 or verify_header[4:8] not in [b'ftyp', b'mdat', b'moov']:
-                    shutil.copy2(backup_path, file_path)
-                    os.remove(backup_path)
-                    return False
-
-            os.remove(backup_path)
-            return True
-        except Exception:
-            if os.path.exists(backup_path):
+            # verify by attempting to load the saved file with mutagen
+            try:
+                _ = MP4(file_path)
+            except Exception as e:
+                logging.error("Mutagen failed to re-open saved file, restoring backup: %s", e)
                 shutil.copy2(backup_path, file_path)
                 os.remove(backup_path)
+                return False
+
+            os.remove(backup_path)
+            logging.info("Successfully set video metadata using mutagen: %s", file_path)
+            return True
+        except Exception as e:
+            logging.exception("Error writing mutagen metadata, restoring backup if any: %s", file_path)
+            if os.path.exists(backup_path):
+                try:
+                    shutil.copy2(backup_path, file_path)
+                    os.remove(backup_path)
+                except Exception:
+                    pass
             return False
 
     except Exception:
+        logging.exception("Unexpected error in set_video_metadata for %s", file_path)
         if os.path.exists(backup_path):
-            os.remove(backup_path)
+            try:
+                os.remove(backup_path)
+            except Exception:
+                pass
         return False
 
 
