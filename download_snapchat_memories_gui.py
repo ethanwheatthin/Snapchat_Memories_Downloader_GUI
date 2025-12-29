@@ -7,6 +7,7 @@ import platform
 import subprocess
 import shutil
 import threading
+from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 import time
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
@@ -15,6 +16,7 @@ import zipfile
 import tempfile
 import re
 import webbrowser
+import sys
 
 # For PIL and piexif: detect availability separately
 HAS_PIEXIF = False
@@ -70,6 +72,9 @@ logging.basicConfig(
 
 # --- Delegated to refactored utility module ---
 import snap_utils, exif_utils, video_utils, zip_utils, downloader
+
+# Windows-specific subprocess flag to prevent command windows from popping up
+CREATE_NO_WINDOW = 0x08000000 if sys.platform == 'win32' else 0
 
 def parse_date(date_str):
     """Parse date string from JSON format to datetime object. Delegates to snap_utils."""
@@ -154,7 +159,8 @@ def convert_with_vlc_subprocess(input_path, output_path):
             cmd,
             capture_output=True,
             text=True,
-            timeout=300  # 5 minute timeout
+            timeout=300,  # 5 minute timeout
+            creationflags=CREATE_NO_WINDOW
         )
         
         # Check if output file was created
@@ -277,7 +283,7 @@ def merge_video_overlay(main_video_path, overlay_image_path, output_path):
         ]
 
         logging.info(f"Running ffmpeg to merge video overlay: {' '.join(cmd)}")
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300, creationflags=CREATE_NO_WINDOW)
         if proc.returncode != 0:
             logging.error(f"ffmpeg failed: {proc.stderr}")
             return False, proc.stderr
@@ -777,15 +783,17 @@ class SnapchatDownloaderGUI:
     def __init__(self, root):
         self.root = root
         self.root.title("Snapchat Memories Downloader")
-        self.root.geometry("700x700")
+        self.root.geometry("1000x800")
         self.root.resizable(True, True)
-        self.root.minsize(700, 600)
+        self.root.minsize(900, 700)
         
         # Variables
         self.json_path = tk.StringVar()
         self.output_path = tk.StringVar(value="downloads")
         # Conversion is automatic when tools are available; no checkbox in UI
         self.max_retries = tk.IntVar(value=3)  # Number of download attempts (initial + retries)
+        default_threads = 3
+        self.max_threads = tk.IntVar(value=default_threads)
         self.is_downloading = False
         self.stop_download = False
         
@@ -801,55 +809,61 @@ class SnapchatDownloaderGUI:
     def setup_styles(self):
         """Configure ttk styles for a modern look."""
         style = ttk.Style()
-        style.theme_use('clam')
-        
-        # Colors
-        bg_color = "#f5f6fa"
-        primary_color = "#3742fa"
-        secondary_color = "#5f27cd"
-        success_color = "#00d2d3"
-        text_color = "#2f3542"
-        
-        # Configure root background
+        try:
+            style.theme_use('clam')
+        except Exception:
+            pass
+
+        # Modern palette
+        bg_color = "#f4f7fb"        # app background
+        card_bg = "#ffffff"
+        primary_color = "#2168f3"  # primary blue
+        accent_color = "#7c5cff"   # accent
+        success_color = "#00b894"
+        text_color = "#2b3440"
+        muted_color = "#6c757d"
+
+        # Apply root background
         self.root.configure(bg=bg_color)
-        
-        # Frame style
-        style.configure("Card.TFrame", background="white", relief="flat")
+
+        # Card and main frame styles
         style.configure("Main.TFrame", background=bg_color)
-        
+        style.configure("Card.TFrame", background=card_bg, relief="flat", borderwidth=1)
+
         # Label styles
-        style.configure("Title.TLabel", background="white", foreground=text_color, 
-                       font=("Segoe UI", 18, "bold"))
-        style.configure("Subtitle.TLabel", background="white", foreground="#747d8c", 
-                       font=("Segoe UI", 10))
-        style.configure("Header.TLabel", background="white", foreground=text_color, 
-                       font=("Segoe UI", 11, "bold"))
-        style.configure("Info.TLabel", background="white", foreground="#747d8c", 
-                       font=("Segoe UI", 9))
-        style.configure("Status.TLabel", background="white", foreground=text_color, 
-                       font=("Segoe UI", 9))
-        
+        style.configure("Title.TLabel", background=card_bg, foreground=text_color,
+                        font=("Segoe UI", 18, "bold"))
+        style.configure("Subtitle.TLabel", background=card_bg, foreground=muted_color,
+                        font=("Segoe UI", 10))
+        style.configure("Header.TLabel", background=card_bg, foreground=text_color,
+                        font=("Segoe UI", 11, "bold"))
+        style.configure("Info.TLabel", background=card_bg, foreground=muted_color,
+                        font=("Segoe UI", 9))
+        style.configure("Status.TLabel", background=card_bg, foreground=text_color,
+                        font=("Segoe UI", 9))
+
         # Button styles
-        style.configure("Primary.TButton", font=("Segoe UI", 10, "bold"), 
-                       padding=10, relief="flat")
+        style.configure("Primary.TButton", font=("Segoe UI", 10, "bold"),
+                        padding=(12, 8), foreground="white", background=primary_color)
         style.map("Primary.TButton",
-                 foreground=[("active", "white"), ("!active", "white"), ("disabled", "#a4b0be")],
-                 background=[("active", secondary_color), ("!active", primary_color), ("disabled", "#dfe4ea")])
-        
-        style.configure("Secondary.TButton", font=("Segoe UI", 9), 
-                       padding=8, relief="flat")
-        
-        style.configure("Stop.TButton", font=("Segoe UI", 9, "bold"), 
-                       padding=8, relief="flat")
+                  background=[("active", accent_color), ("!active", primary_color), ("disabled", "#cbd5e1")],
+                  foreground=[("disabled", "#f1f5f9")])
+
+        style.configure("Secondary.TButton", font=("Segoe UI", 9), padding=(8, 6),
+                        foreground=primary_color, background=card_bg)
+
+        style.configure("Stop.TButton", font=("Segoe UI", 9, "bold"), padding=(8, 6),
+                        foreground="white", background="#e74c3c")
         style.map("Stop.TButton",
-                 foreground=[("active", "white"), ("!active", "white"), ("disabled", "#a4b0be")],
-                 background=[("active", "#c23616"), ("!active", "#e84118"), ("disabled", "#dfe4ea")])
-        
-        # Progressbar style
-        style.configure("Custom.Horizontal.TProgressbar", 
-                       troughcolor=bg_color, 
-                       background=success_color, 
-                       thickness=20)
+                  background=[("active", "#c0392b"), ("!active", "#e74c3c"), ("disabled", "#f1f5f9")],
+                  foreground=[("disabled", "#f1f5f9")])
+
+        # Progressbar style: slimmer and colored
+        style.configure("Custom.Horizontal.TProgressbar", troughcolor=card_bg,
+                        background=success_color, thickness=14)
+
+        # Small helper used across widgets for consistent padding
+        self._card_padding = 16
     
     def center_window(self):
         """Center the window on the screen."""
@@ -916,8 +930,13 @@ class SnapchatDownloaderGUI:
         self.output_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 10))
         
         output_btn = ttk.Button(output_frame, text="Browse...", 
-                               command=self.browse_output, style="Secondary.TButton")
+                       command=self.browse_output, style="Secondary.TButton")
         output_btn.pack(side=tk.LEFT)
+
+        # Open output directory button (next to Browse)
+        open_out_btn = ttk.Button(output_frame, text="Open",
+                      command=self.open_output_dir, style="Secondary.TButton", width=8)
+        open_out_btn.pack(side=tk.LEFT, padx=(8, 0))
         
         output_info = ttk.Label(input_card, 
                                text="Choose where to save your downloaded memories", 
@@ -996,6 +1015,21 @@ class SnapchatDownloaderGUI:
                                  style="Info.TLabel")
         retries_info.pack(anchor=tk.W, pady=(6, 10))
 
+        # Download threads option
+        threads_frame = ttk.Frame(input_card, style="Card.TFrame")
+        threads_frame.pack(fill=tk.X, pady=(0, 12))
+
+        threads_label = ttk.Label(threads_frame, text="Multi-Download Count:", style="Header.TLabel")
+        threads_label.pack(side=tk.LEFT)
+
+        threads_spin = tk.Spinbox(threads_frame, from_=1, to=16, width=5, textvariable=self.max_threads)
+        threads_spin.pack(side=tk.LEFT, padx=(8, 0))
+
+        threads_info = ttk.Label(input_card,
+                                 text="Number of concurrent downloads (higher uses more bandwidth/CPU)",
+                                 style="Info.TLabel")
+        threads_info.pack(anchor=tk.W, pady=(6, 10))
+
         # Check available conversion tools and display status
         # conversion_status = self.get_conversion_status()
         # conversion_info = ttk.Label(input_card,
@@ -1066,6 +1100,22 @@ class SnapchatDownloaderGUI:
         directory = filedialog.askdirectory(title="Select Output Directory")
         if directory:
             self.output_path.set(directory)
+
+    def open_output_dir(self):
+        """Open the currently selected output directory in the system file manager."""
+        path = self.output_path.get() or "downloads"
+        if not os.path.exists(path):
+            messagebox.showwarning("Folder not found", f"Directory not found: {path}")
+            return
+        try:
+            # Windows
+            if os.name == 'nt':
+                os.startfile(path)
+                return
+            # macOS / Linux fallback to file URL open
+            webbrowser.open(f"file://{os.path.abspath(path)}")
+        except Exception as e:
+            messagebox.showerror("Error", f"Could not open folder: {e}")
     
     def get_conversion_status(self):
         """Check what conversion tools are available and return status message."""
@@ -1141,7 +1191,236 @@ class SnapchatDownloaderGUI:
         self.stop_btn.config(state=tk.DISABLED, text="⏹ Stopping...")
         self.status_label.config(text="⚠ Stopping download...", foreground="#f39c12")
         self.log("⚠ Stopping download...")
-    
+
+    def process_media_item(self, idx, total, item, output_path, max_retries):
+        logs = [f"[{idx}/{total}] Processing..."]
+
+        def log_local(message):
+            logs.append(message)
+
+        def progress_callback(message):
+            log_local(f"  {message}")
+
+        try:
+            # Extract metadata
+            date_str = item.get("Date", "")
+            media_type = item.get("Media Type", "Unknown")
+            location_str = item.get("Location", "")
+            download_url = item.get("Media Download Url", "")
+
+            if not download_url:
+                log_local("  ⚠ No download URL found, skipping")
+                return logs, False, True
+
+            # Parse date and location
+            try:
+                date_obj = parse_date(date_str)
+            except Exception:
+                log_local("  ⚠ Invalid date format, skipping")
+                return logs, False, True
+
+            latitude, longitude = parse_location(location_str)
+
+            # Log location data for debugging
+            if latitude is not None and longitude is not None:
+                log_local(f"  📍 Location: {latitude}, {longitude}")
+            else:
+                log_local("  📍 No location data available")
+
+            # Generate filename
+            date_formatted = date_obj.strftime("%Y%m%d_%H%M%S")
+            extension = get_file_extension(media_type)
+            filename = f"{date_formatted}_{idx}{extension}"
+            file_path = output_path / filename
+
+            log_local(f"  File: {filename}")
+            log_local(f"  Type: {media_type}")
+
+            # Download file
+            download_success, merged_files = download_media(
+                download_url,
+                str(file_path),
+                max_retries=max_retries,
+                progress_callback=progress_callback,
+                date_obj=date_obj
+            )
+
+            if download_success:
+                log_local("  ✓ Downloaded")
+
+                # If merged files were created from ZIP overlay, apply metadata to each
+                if merged_files:
+                    log_local(f"  ℹ Processing {len(merged_files)} merged file(s) from ZIP overlay")
+                    for merged_file in merged_files:
+                        merged_path = Path(merged_file)
+                        log_local(f"  📄 {merged_path.name}")
+
+                        # Determine if it's a video or image
+                        ext = merged_path.suffix.lower()
+                        is_video = ext in ['.mp4', '.mov', '.m4v', '.avi', '.mkv']
+
+                        if is_video:
+                            # Ensure portrait orientation for merged video
+                            try:
+                                rot_ok, rot_msg = enforce_portrait_video(str(merged_path))
+                                if rot_ok:
+                                    log_local("    ✓ Ensured portrait orientation")
+                                else:
+                                    log_local(f"    ⚠ Could not enforce portrait orientation: {rot_msg}")
+                            except Exception as e:
+                                log_local(f"    ⚠ Error enforcing portrait orientation: {e}")
+
+                            # Set video metadata - try ffmpeg first for better compatibility, then mutagen
+                            metadata_set = False
+
+                            # Try ffmpeg first (sets standard creation_time metadata)
+                            try:
+                                if set_video_metadata_ffmpeg(str(merged_path), date_obj, latitude, longitude):
+                                    log_local("    ✓ Set video metadata (ffmpeg)")
+                                    metadata_set = True
+                            except Exception as ffmpeg_error:
+                                log_local(f"    ℹ ffmpeg metadata setting failed, trying mutagen: {ffmpeg_error}")
+
+                            # Fall back to mutagen if ffmpeg didn't work
+                            if not metadata_set and HAS_MUTAGEN:
+                                try:
+                                    if set_video_metadata(str(merged_path), date_obj, latitude, longitude):
+                                        log_local("    ✓ Set video metadata (mutagen)")
+                                        metadata_set = True
+                                except Exception as metadata_error:
+                                    log_local(f"    ⚠ Metadata error: {metadata_error}")
+
+                            if not metadata_set:
+                                log_local("    ℹ Video metadata not set (install ffmpeg or mutagen)")
+
+                            set_file_timestamps(str(merged_path), date_obj)
+                            log_local("    ✓ Set file timestamps")
+                        else:
+                            # Set image metadata
+                            if HAS_PIEXIF and ext in ['.jpg', '.jpeg']:
+                                try:
+                                    set_image_exif_metadata(str(merged_path), date_obj, latitude, longitude)
+                                    log_local("    ✓ Set EXIF metadata")
+                                except Exception as exif_error:
+                                    log_local(f"    ⚠ EXIF metadata error: {exif_error}")
+                            set_file_timestamps(str(merged_path), date_obj)
+                            log_local("    ✓ Set file timestamps")
+
+                    return logs, True, False
+
+                # Set metadata
+                if media_type == "Image" and extension.lower() in ['.jpg', '.jpeg']:
+                    if HAS_PIEXIF:
+                        try:
+                            set_image_exif_metadata(str(file_path), date_obj, latitude, longitude)
+                            log_local("  ✓ Set EXIF metadata")
+                        except Exception as exif_error:
+                            log_local(f"  ⚠ EXIF metadata error: {exif_error}")
+                    # Always set file timestamps for images
+                    set_file_timestamps(str(file_path), date_obj)
+                elif media_type == "Video":
+                    # Convert all videos to H.264 by default
+                    log_local("  🔄 Converting to H.264...")
+
+                    # Check if any conversion tool is available
+                    if not HAS_PYAV and not find_vlc_executable() and not HAS_VLC:
+                        log_local("  ⚠ No conversion tools available - keeping original format")
+                        log_local("  ℹ Install PyAV (pip install av) or VLC for automatic H.264 conversion")
+                        # Still count as success - video was downloaded
+                    else:
+                        # Pass the custom failed_dir path
+                        failed_conversions_dir = str(output_path / "failed_conversions")
+                        try:
+                            success, result = convert_hevc_to_h264(
+                                str(file_path),
+                                failed_dir_path=failed_conversions_dir
+                            )
+                            if success:
+                                log_local("  ✓ Converted to H.264")
+                                # Replace original with converted file
+                                try:
+                                    os.remove(str(file_path))
+                                    os.rename(result, str(file_path))
+                                    # CRITICAL: Set timestamps AFTER file replacement
+                                    set_file_timestamps(str(file_path), date_obj)
+                                    log_local("  ✓ Set file timestamps")
+                                except Exception as rename_error:
+                                    log_local(f"  ⚠ Could not replace original: {rename_error}")
+                                    # If replacement failed but conversion succeeded, still set timestamps on original
+                                    set_file_timestamps(str(file_path), date_obj)
+                            else:
+                                log_local(f"  ⚠ Conversion failed: {result}")
+                                # Don't count as error - file is still downloaded in original format
+                                # Set timestamps on original file
+                                set_file_timestamps(str(file_path), date_obj)
+                        except Exception as conversion_error:
+                            log_local(f"  ⚠ Conversion error: {conversion_error}")
+                            # Ensure timestamps are set even if conversion crashes
+                            set_file_timestamps(str(file_path), date_obj)
+
+                    # Try to set video metadata - use ffmpeg first for better compatibility, then mutagen
+                    metadata_set = False
+
+                    # Try ffmpeg first (sets standard creation_time metadata)
+                    try:
+                        if set_video_metadata_ffmpeg(str(file_path), date_obj, latitude, longitude):
+                            log_local("  ✓ Set video metadata (ffmpeg)")
+                            metadata_set = True
+                    except Exception as ffmpeg_error:
+                        logging.debug(f"ffmpeg metadata setting failed: {ffmpeg_error}")
+
+                    # Fall back to mutagen if ffmpeg didn't work
+                    if not metadata_set and HAS_MUTAGEN:
+                        try:
+                            if set_video_metadata(str(file_path), date_obj, latitude, longitude):
+                                log_local("  ✓ Set video metadata (mutagen)")
+                                metadata_set = True
+                        except Exception as metadata_error:
+                            log_local(f"  ⚠ Metadata error: {metadata_error}")
+
+                    if not metadata_set:
+                        log_local("  ℹ Video downloaded (install ffmpeg or mutagen for embedded metadata)")
+
+                # ALWAYS set file timestamps as final step for any media type
+                # This ensures the creation/modification date is correct even if other metadata fails
+                # Ensure portrait orientation for videos before finalizing timestamps/metadata
+                try:
+                    if media_type == "Video":
+                        try:
+                            rot_ok, rot_msg = enforce_portrait_video(str(file_path))
+                            if rot_ok:
+                                log_local("  ✓ Ensured portrait orientation")
+                            else:
+                                log_local(f"  ⚠ Could not enforce portrait orientation: {rot_msg}")
+                        except Exception as e:
+                            log_local(f"  ⚠ Error enforcing portrait orientation: {e}")
+                except Exception:
+                    pass
+
+                try:
+                    set_file_timestamps(str(file_path), date_obj)
+                    log_local("  ✓ File date set correctly")
+                except Exception as timestamp_error:
+                    log_local(f"  ⚠ Failed to set file timestamps: {timestamp_error}")
+
+                # Validate the downloaded file
+                try:
+                    if not validate_downloaded_file(str(file_path)):
+                        log_local("  ⚠ Downloaded file is corrupted or incomplete")
+                        return logs, False, True
+                except Exception as validation_error:
+                    log_local(f"  ⚠ Validation error: {validation_error}")
+
+                return logs, True, False
+
+            log_local("  ✗ Download failed")
+            return logs, False, True
+
+        except Exception as item_error:
+            log_local(f"  ✗ Error processing item: {item_error}")
+            logging.error(f"Error processing item {idx}: {item_error}", exc_info=True)
+            return logs, False, True
+
     def download_thread(self, json_file, output_dir):
         """Download process running in separate thread."""
         try:
@@ -1167,234 +1446,74 @@ class SnapchatDownloaderGUI:
             # Process each item
             success_count = 0
             error_count = 0
-            
-            for idx, item in enumerate(media_items, 1):
-                if self.stop_download:
-                    self.log("\n⚠ Download stopped by user")
-                    break
-                
+
+            max_retries = self.max_retries.get()
+            max_workers = max(1, min(self.max_threads.get(), total))
+            self.log(f"Using {max_workers} download thread(s)\n")
+
+            items_iter = iter(enumerate(media_items, 1))
+            futures = {}
+            completed_count = 0
+            stop_logged = False
+
+            def submit_next():
                 try:
-                    self.update_progress(idx, total)
-                    self.log(f"[{idx}/{total}] Processing...")
-                    
-                    # Extract metadata
-                    date_str = item.get("Date", "")
-                    media_type = item.get("Media Type", "Unknown")
-                    location_str = item.get("Location", "")
-                    download_url = item.get("Media Download Url", "")
-                    
-                    if not download_url:
-                        self.log("  ⚠ No download URL found, skipping\n")
-                        error_count += 1
-                        continue
-                    
-                    # Parse date and location
-                    try:
-                        date_obj = parse_date(date_str)
-                    except:
-                        self.log("  ⚠ Invalid date format, skipping\n")
-                        error_count += 1
-                        continue
-                        
-                    latitude, longitude = parse_location(location_str)
-                    
-                    # Log location data for debugging
-                    if latitude is not None and longitude is not None:
-                        self.log(f"  📍 Location: {latitude}, {longitude}")
-                    else:
-                        self.log(f"  📍 No location data available")
-                    
-                    # Generate filename
-                    date_formatted = date_obj.strftime("%Y%m%d_%H%M%S")
-                    extension = get_file_extension(media_type)
-                    filename = f"{date_formatted}_{idx}{extension}"
-                    file_path = output_path / filename
-                    
-                    self.log(f"  File: {filename}")
-                    self.log(f"  Type: {media_type}")
-                    
-                    # Download file
-                    download_success, merged_files = download_media(download_url, str(file_path), max_retries=self.max_retries.get(), progress_callback=self.log, date_obj=date_obj)
-                    if download_success:
-                        self.log("  ✓ Downloaded")
-                        
-                        # If merged files were created from ZIP overlay, apply metadata to each
-                        if merged_files:
-                            self.log(f"  ℹ Processing {len(merged_files)} merged file(s) from ZIP overlay")
-                            for merged_file in merged_files:
-                                merged_path = Path(merged_file)
-                                self.log(f"  📄 {merged_path.name}")
-                                
-                                # Determine if it's a video or image
-                                ext = merged_path.suffix.lower()
-                                is_video = ext in ['.mp4', '.mov', '.m4v', '.avi', '.mkv']
-                                
-                                if is_video:
-                                    # Ensure portrait orientation for merged video
-                                    try:
-                                        rot_ok, rot_msg = enforce_portrait_video(str(merged_path))
-                                        if rot_ok:
-                                            self.log("    ✓ Ensured portrait orientation")
-                                        else:
-                                            self.log(f"    ⚠ Could not enforce portrait orientation: {rot_msg}")
-                                    except Exception as e:
-                                        self.log(f"    ⚠ Error enforcing portrait orientation: {e}")
+                    idx, item = next(items_iter)
+                except StopIteration:
+                    return False
 
-                                    # Set video metadata - try ffmpeg first for better compatibility, then mutagen
-                                    metadata_set = False
-                                    
-                                    # Try ffmpeg first (sets standard creation_time metadata)
-                                    try:
-                                        if set_video_metadata_ffmpeg(str(merged_path), date_obj, latitude, longitude):
-                                            self.log("    ✓ Set video metadata (ffmpeg)")
-                                            metadata_set = True
-                                    except Exception as ffmpeg_error:
-                                        self.log(f"    ℹ ffmpeg metadata setting failed, trying mutagen: {ffmpeg_error}")
-                                    
-                                    # Fall back to mutagen if ffmpeg didn't work
-                                    if not metadata_set and HAS_MUTAGEN:
-                                        try:
-                                            if set_video_metadata(str(merged_path), date_obj, latitude, longitude):
-                                                self.log("    ✓ Set video metadata (mutagen)")
-                                                metadata_set = True
-                                        except Exception as metadata_error:
-                                            self.log(f"    ⚠ Metadata error: {metadata_error}")
-                                    
-                                    if not metadata_set:
-                                        self.log("    ℹ Video metadata not set (install ffmpeg or mutagen)")
-                                    
-                                    set_file_timestamps(str(merged_path), date_obj)
-                                    self.log("    ✓ Set file timestamps")
-                                else:
-                                    # Set image metadata
-                                    if HAS_PIEXIF and ext in ['.jpg', '.jpeg']:
-                                        try:
-                                            set_image_exif_metadata(str(merged_path), date_obj, latitude, longitude)
-                                            self.log("    ✓ Set EXIF metadata")
-                                        except Exception as exif_error:
-                                            self.log(f"    ⚠ EXIF metadata error: {exif_error}")
-                                    set_file_timestamps(str(merged_path), date_obj)
-                                    self.log("    ✓ Set file timestamps")
-                            
+                future = executor.submit(
+                    self.process_media_item,
+                    idx,
+                    total,
+                    item,
+                    output_path,
+                    max_retries
+                )
+                futures[future] = idx
+                return True
+
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                while len(futures) < max_workers and submit_next():
+                    pass
+
+                while futures:
+                    done, _ = wait(futures, return_when=FIRST_COMPLETED)
+                    for future in done:
+                        idx = futures.pop(future)
+                        completed_count += 1
+
+                        try:
+                            logs, success, error = future.result()
+                        except Exception as item_error:
+                            logs = [
+                                f"[{idx}/{total}] Processing...",
+                                f"  ✗ Error processing item: {item_error}"
+                            ]
+                            logging.error(f"Error processing item {idx}: {item_error}", exc_info=True)
+                            success = False
+                            error = True
+
+                        for line in logs:
+                            self.log(line)
+
+                        if success:
                             success_count += 1
-                            continue
-                        
-                        # Set metadata
-                        if media_type == "Image" and extension.lower() in ['.jpg', '.jpeg']:
-                            if HAS_PIEXIF:
-                                try:
-                                    set_image_exif_metadata(str(file_path), date_obj, latitude, longitude)
-                                    self.log("  ✓ Set EXIF metadata")
-                                except Exception as exif_error:
-                                    self.log(f"  ⚠ EXIF metadata error: {exif_error}")
-                            # Always set file timestamps for images
-                            set_file_timestamps(str(file_path), date_obj)
-                        elif media_type == "Video":
-                            # Convert all videos to H.264 by default
-                            self.log("  🔄 Converting to H.264...")
-                            
-                            # Check if any conversion tool is available
-                            if not HAS_PYAV and not find_vlc_executable() and not HAS_VLC:
-                                self.log("  ⚠ No conversion tools available - keeping original format")
-                                self.log("  ℹ Install PyAV (pip install av) or VLC for automatic H.264 conversion")
-                                # Still count as success - video was downloaded
-                            else:
-                                # Pass the custom failed_dir path
-                                failed_conversions_dir = str(output_path / "failed_conversions")
-                                try:
-                                    success, result = convert_hevc_to_h264(
-                                        str(file_path), 
-                                        failed_dir_path=failed_conversions_dir
-                                    )
-                                    if success:
-                                        self.log(f"  ✓ Converted to H.264")
-                                        # Replace original with converted file
-                                        try:
-                                            os.remove(str(file_path))
-                                            os.rename(result, str(file_path))
-                                            # CRITICAL: Set timestamps AFTER file replacement
-                                            set_file_timestamps(str(file_path), date_obj)
-                                            self.log("  ✓ Set file timestamps")
-                                        except Exception as rename_error:
-                                            self.log(f"  ⚠ Could not replace original: {rename_error}")
-                                            # If replacement failed but conversion succeeded, still set timestamps on original
-                                            set_file_timestamps(str(file_path), date_obj)
-                                    else:
-                                        self.log(f"  ⚠ Conversion failed: {result}")
-                                        # Don't count as error - file is still downloaded in original format
-                                        # Set timestamps on original file
-                                        set_file_timestamps(str(file_path), date_obj)
-                                except Exception as conversion_error:
-                                    self.log(f"  ⚠ Conversion error: {conversion_error}")
-                                    # Ensure timestamps are set even if conversion crashes
-                                    set_file_timestamps(str(file_path), date_obj)
-                            
-                            # Try to set video metadata - use ffmpeg first for better compatibility, then mutagen
-                            metadata_set = False
-                            
-                            # Try ffmpeg first (sets standard creation_time metadata)
-                            try:
-                                if set_video_metadata_ffmpeg(str(file_path), date_obj, latitude, longitude):
-                                    self.log("  ✓ Set video metadata (ffmpeg)")
-                                    metadata_set = True
-                            except Exception as ffmpeg_error:
-                                logging.debug(f"ffmpeg metadata setting failed: {ffmpeg_error}")
-                            
-                            # Fall back to mutagen if ffmpeg didn't work
-                            if not metadata_set and HAS_MUTAGEN:
-                                try:
-                                    if set_video_metadata(str(file_path), date_obj, latitude, longitude):
-                                        self.log("  ✓ Set video metadata (mutagen)")
-                                        metadata_set = True
-                                except Exception as metadata_error:
-                                    self.log(f"  ⚠ Metadata error: {metadata_error}")
-                            
-                            if not metadata_set:
-                                self.log("  ℹ Video downloaded (install ffmpeg or mutagen for embedded metadata)")
-                        
-                        # ALWAYS set file timestamps as final step for any media type
-                        # This ensures the creation/modification date is correct even if other metadata fails
-                        # Ensure portrait orientation for videos before finalizing timestamps/metadata
-                        try:
-                            if media_type == "Video":
-                                try:
-                                    rot_ok, rot_msg = enforce_portrait_video(str(file_path))
-                                    if rot_ok:
-                                        self.log("  ✓ Ensured portrait orientation")
-                                    else:
-                                        self.log(f"  ⚠ Could not enforce portrait orientation: {rot_msg}")
-                                except Exception as e:
-                                    self.log(f"  ⚠ Error enforcing portrait orientation: {e}")
-                        except Exception:
-                            pass
+                        if error:
+                            error_count += 1
 
-                        try:
-                            set_file_timestamps(str(file_path), date_obj)
-                            self.log("  ✓ File date set correctly")
-                        except Exception as timestamp_error:
-                            self.log(f"  ⚠ Failed to set file timestamps: {timestamp_error}")
-                        
-                        # Validate the downloaded file
-                        try:
-                            if not validate_downloaded_file(str(file_path)):
-                                self.log("  ⚠ Downloaded file is corrupted or incomplete")
-                                error_count += 1
-                                continue
-                        except Exception as validation_error:
-                            self.log(f"  ⚠ Validation error: {validation_error}")
-                        
-                        success_count += 1
-                    else:
-                        self.log("  ✗ Download failed")
-                        error_count += 1
-                
-                except Exception as item_error:
-                    # Catch any error during processing of this item to prevent crash
-                    self.log(f"  ✗ Error processing item: {item_error}")
-                    logging.error(f"Error processing item {idx}: {item_error}", exc_info=True)
-                    error_count += 1
-                
-                self.log("")  # Empty line
+                        self.update_progress(completed_count, total)
+                        self.log("")  # Empty line
+
+                        if self.stop_download and not stop_logged:
+                            self.log("\n⚠ Download stopped by user")
+                            stop_logged = True
+
+                    if self.stop_download:
+                        continue
+
+                    while len(futures) < max_workers and submit_next():
+                        pass
             
             # Final summary
             self.log("=" * 50)

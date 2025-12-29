@@ -5,6 +5,10 @@ from pathlib import Path
 import zipfile
 import tempfile
 import re
+import sys
+
+# Windows-specific subprocess flag to prevent command windows from popping up
+CREATE_NO_WINDOW = 0x08000000 if sys.platform == 'win32' else 0
 
 # Pillow detection
 HAS_PIL = False
@@ -94,7 +98,7 @@ def merge_video_overlay(main_video_path, overlay_image_path, output_path):
         ]
 
         logging.info(f"Running ffmpeg to merge video overlay: {' '.join(cmd)}")
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300, creationflags=CREATE_NO_WINDOW)
         if proc.returncode != 0:
             logging.error(f"ffmpeg failed: {proc.stderr}")
             return False, proc.stderr
