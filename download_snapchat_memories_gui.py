@@ -778,9 +778,9 @@ class SnapchatDownloaderGUI:
     def __init__(self, root):
         self.root = root
         self.root.title("Snapchat Memories Downloader")
-        self.root.geometry("700x700")
+        self.root.geometry("1000x800")
         self.root.resizable(True, True)
-        self.root.minsize(700, 600)
+        self.root.minsize(900, 700)
         
         # Variables
         self.json_path = tk.StringVar()
@@ -788,7 +788,7 @@ class SnapchatDownloaderGUI:
         # Conversion is automatic when tools are available; no checkbox in UI
         self.max_retries = tk.IntVar(value=3)  # Number of download attempts (initial + retries)
         default_threads = 3
-        self.max_threads = min(8, max(1, (os.cpu_count() or 4)))
+        self.max_threads = tk.IntVar(value=default_threads)
         self.is_downloading = False
         self.stop_download = False
         
@@ -804,55 +804,61 @@ class SnapchatDownloaderGUI:
     def setup_styles(self):
         """Configure ttk styles for a modern look."""
         style = ttk.Style()
-        style.theme_use('clam')
-        
-        # Colors
-        bg_color = "#f5f6fa"
-        primary_color = "#3742fa"
-        secondary_color = "#5f27cd"
-        success_color = "#00d2d3"
-        text_color = "#2f3542"
-        
-        # Configure root background
+        try:
+            style.theme_use('clam')
+        except Exception:
+            pass
+
+        # Modern palette
+        bg_color = "#f4f7fb"        # app background
+        card_bg = "#ffffff"
+        primary_color = "#2168f3"  # primary blue
+        accent_color = "#7c5cff"   # accent
+        success_color = "#00b894"
+        text_color = "#2b3440"
+        muted_color = "#6c757d"
+
+        # Apply root background
         self.root.configure(bg=bg_color)
-        
-        # Frame style
-        style.configure("Card.TFrame", background="white", relief="flat")
+
+        # Card and main frame styles
         style.configure("Main.TFrame", background=bg_color)
-        
+        style.configure("Card.TFrame", background=card_bg, relief="flat", borderwidth=1)
+
         # Label styles
-        style.configure("Title.TLabel", background="white", foreground=text_color, 
-                       font=("Segoe UI", 18, "bold"))
-        style.configure("Subtitle.TLabel", background="white", foreground="#747d8c", 
-                       font=("Segoe UI", 10))
-        style.configure("Header.TLabel", background="white", foreground=text_color, 
-                       font=("Segoe UI", 11, "bold"))
-        style.configure("Info.TLabel", background="white", foreground="#747d8c", 
-                       font=("Segoe UI", 9))
-        style.configure("Status.TLabel", background="white", foreground=text_color, 
-                       font=("Segoe UI", 9))
-        
+        style.configure("Title.TLabel", background=card_bg, foreground=text_color,
+                        font=("Segoe UI", 18, "bold"))
+        style.configure("Subtitle.TLabel", background=card_bg, foreground=muted_color,
+                        font=("Segoe UI", 10))
+        style.configure("Header.TLabel", background=card_bg, foreground=text_color,
+                        font=("Segoe UI", 11, "bold"))
+        style.configure("Info.TLabel", background=card_bg, foreground=muted_color,
+                        font=("Segoe UI", 9))
+        style.configure("Status.TLabel", background=card_bg, foreground=text_color,
+                        font=("Segoe UI", 9))
+
         # Button styles
-        style.configure("Primary.TButton", font=("Segoe UI", 10, "bold"), 
-                       padding=10, relief="flat")
+        style.configure("Primary.TButton", font=("Segoe UI", 10, "bold"),
+                        padding=(12, 8), foreground="white", background=primary_color)
         style.map("Primary.TButton",
-                 foreground=[("active", "white"), ("!active", "white"), ("disabled", "#a4b0be")],
-                 background=[("active", secondary_color), ("!active", primary_color), ("disabled", "#dfe4ea")])
-        
-        style.configure("Secondary.TButton", font=("Segoe UI", 9), 
-                       padding=8, relief="flat")
-        
-        style.configure("Stop.TButton", font=("Segoe UI", 9, "bold"), 
-                       padding=8, relief="flat")
+                  background=[("active", accent_color), ("!active", primary_color), ("disabled", "#cbd5e1")],
+                  foreground=[("disabled", "#f1f5f9")])
+
+        style.configure("Secondary.TButton", font=("Segoe UI", 9), padding=(8, 6),
+                        foreground=primary_color, background=card_bg)
+
+        style.configure("Stop.TButton", font=("Segoe UI", 9, "bold"), padding=(8, 6),
+                        foreground="white", background="#e74c3c")
         style.map("Stop.TButton",
-                 foreground=[("active", "white"), ("!active", "white"), ("disabled", "#a4b0be")],
-                 background=[("active", "#c23616"), ("!active", "#e84118"), ("disabled", "#dfe4ea")])
-        
-        # Progressbar style
-        style.configure("Custom.Horizontal.TProgressbar", 
-                       troughcolor=bg_color, 
-                       background=success_color, 
-                       thickness=20)
+                  background=[("active", "#c0392b"), ("!active", "#e74c3c"), ("disabled", "#f1f5f9")],
+                  foreground=[("disabled", "#f1f5f9")])
+
+        # Progressbar style: slimmer and colored
+        style.configure("Custom.Horizontal.TProgressbar", troughcolor=card_bg,
+                        background=success_color, thickness=14)
+
+        # Small helper used across widgets for consistent padding
+        self._card_padding = 16
     
     def center_window(self):
         """Center the window on the screen."""
@@ -919,8 +925,13 @@ class SnapchatDownloaderGUI:
         self.output_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 10))
         
         output_btn = ttk.Button(output_frame, text="Browse...", 
-                               command=self.browse_output, style="Secondary.TButton")
+                       command=self.browse_output, style="Secondary.TButton")
         output_btn.pack(side=tk.LEFT)
+
+        # Open output directory button (next to Browse)
+        open_out_btn = ttk.Button(output_frame, text="Open",
+                      command=self.open_output_dir, style="Secondary.TButton", width=8)
+        open_out_btn.pack(side=tk.LEFT, padx=(8, 0))
         
         output_info = ttk.Label(input_card, 
                                text="Choose where to save your downloaded memories", 
@@ -1084,6 +1095,22 @@ class SnapchatDownloaderGUI:
         directory = filedialog.askdirectory(title="Select Output Directory")
         if directory:
             self.output_path.set(directory)
+
+    def open_output_dir(self):
+        """Open the currently selected output directory in the system file manager."""
+        path = self.output_path.get() or "downloads"
+        if not os.path.exists(path):
+            messagebox.showwarning("Folder not found", f"Directory not found: {path}")
+            return
+        try:
+            # Windows
+            if os.name == 'nt':
+                os.startfile(path)
+                return
+            # macOS / Linux fallback to file URL open
+            webbrowser.open(f"file://{os.path.abspath(path)}")
+        except Exception as e:
+            messagebox.showerror("Error", f"Could not open folder: {e}")
     
     def get_conversion_status(self):
         """Check what conversion tools are available and return status message."""
