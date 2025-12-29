@@ -16,6 +16,7 @@ import zipfile
 import tempfile
 import re
 import webbrowser
+import sys
 
 # For PIL and piexif: detect availability separately
 HAS_PIEXIF = False
@@ -71,6 +72,9 @@ logging.basicConfig(
 
 # --- Delegated to refactored utility module ---
 import snap_utils, exif_utils, video_utils, zip_utils, downloader
+
+# Windows-specific subprocess flag to prevent command windows from popping up
+CREATE_NO_WINDOW = 0x08000000 if sys.platform == 'win32' else 0
 
 def parse_date(date_str):
     """Parse date string from JSON format to datetime object. Delegates to snap_utils."""
@@ -155,7 +159,8 @@ def convert_with_vlc_subprocess(input_path, output_path):
             cmd,
             capture_output=True,
             text=True,
-            timeout=300  # 5 minute timeout
+            timeout=300,  # 5 minute timeout
+            creationflags=CREATE_NO_WINDOW
         )
         
         # Check if output file was created
@@ -278,7 +283,7 @@ def merge_video_overlay(main_video_path, overlay_image_path, output_path):
         ]
 
         logging.info(f"Running ffmpeg to merge video overlay: {' '.join(cmd)}")
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300, creationflags=CREATE_NO_WINDOW)
         if proc.returncode != 0:
             logging.error(f"ffmpeg failed: {proc.stderr}")
             return False, proc.stderr
@@ -1014,7 +1019,7 @@ class SnapchatDownloaderGUI:
         threads_frame = ttk.Frame(input_card, style="Card.TFrame")
         threads_frame.pack(fill=tk.X, pady=(0, 12))
 
-        threads_label = ttk.Label(threads_frame, text="Download Threads:", style="Header.TLabel")
+        threads_label = ttk.Label(threads_frame, text="Multi-Download Count:", style="Header.TLabel")
         threads_label.pack(side=tk.LEFT)
 
         threads_spin = tk.Spinbox(threads_frame, from_=1, to=16, width=5, textvariable=self.max_threads)
