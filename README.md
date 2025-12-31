@@ -27,6 +27,7 @@ This tool downloads all your Snapchat memories using the `memories_history.json`
 
 - **Simple GUI** — No command line needed, just point and click
 - **Bulk Download** — Download all your memories at once with retry logic
+- **Resume Downloads** — Skip already downloaded files to resume interrupted sessions
 - **Overlay Merging** — Automatically merges caption/sticker overlays back onto photos and videos
 - **Metadata Preservation** — Embeds original dates and GPS coordinates into EXIF data (images) and file metadata (videos)
 - **Video Conversion** — Automatic H.264 conversion for better Windows compatibility (when VLC is installed)
@@ -103,14 +104,24 @@ python download_snapchat_memories_gui.py
    ![Select Output Directory](images/Output_directory.png)
    ![Application with Paths Selected](images/application_screen_with_paths.png)
 
-4. **Start Download**
+4. **Configure Resume Options (Optional)**
+   - **Skip existing files (resume mode)** — Enable this to avoid re-downloading files that already exist
+     - Useful when resuming after an interruption or adding new memories
+     - Validates existing files and only downloads what's missing
+     - Also checks for multiple filename patterns (merged overlays, collision-resolved files)
+   - **Re-convert existing videos to H.264 if needed** — Only appears when resume mode is enabled
+     - Checks codec of existing videos and re-converts non-H.264 videos
+     - Helps ensure all videos are compatible with Windows Media Player and other tools
+     - Skips videos already in H.264 format to save time
+
+5. **Start Download**
    - Click "Start Download"
    - Monitor progress in the log window
    - Click "Stop" to pause if needed
 
    ![Download in Progress](images/application_screen_with_Download.png)
 
-5. **Access Your Memories**
+6. **Access Your Memories**
    - Files are saved in your output directory
    - Named by creation date: `YYYYMMDD_HHMMSS.jpg` or `YYYYMMDD_HHMMSS.mp4`
    - Overlays are automatically merged when detected
@@ -168,6 +179,8 @@ The executable will be created in the `dist` folder. The build script includes n
 
 ## 💡 Tips
 
+- **Use Resume Mode** — Enable "Skip existing files" when resuming interrupted downloads
+- **Re-convert as needed** — Use the re-conversion option if you have old HEVC videos that won't play properly
 - **Download regularly** to avoid URL expiration
 - **Organize downloads** by creating subfolders by year/month
 - **Verify metadata** by checking a few files after initial download
