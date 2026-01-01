@@ -862,6 +862,11 @@ class SnapchatDownloaderGUI:
         style.configure("Custom.Horizontal.TProgressbar", troughcolor=card_bg,
                         background=success_color, thickness=14)
 
+        # Checkbutton style: match card background
+        style.configure("Card.TCheckbutton", background=card_bg, foreground=text_color,
+                        font=("Segoe UI", 9))
+        style.map("Card.TCheckbutton", background=[("active", card_bg)])
+
         # Small helper used across widgets for consistent padding
         self._card_padding = 16
     
@@ -1030,6 +1035,48 @@ class SnapchatDownloaderGUI:
                                  style="Info.TLabel")
         threads_info.pack(anchor=tk.W, pady=(6, 10))
 
+        # Resume Options Section
+        resume_header = ttk.Label(input_card, text="Resume Options", style="Header.TLabel")
+        resume_header.pack(anchor=tk.W, pady=(15, 8))
+        
+        # Skip existing files checkbox
+        self.skip_existing = tk.BooleanVar(value=False)
+        skip_check = ttk.Checkbutton(
+            input_card,
+            text="Skip existing files (resume mode)",
+            variable=self.skip_existing,
+            style="Card.TCheckbutton",
+            command=self._toggle_reconvert_visibility
+        )
+        skip_check.pack(anchor=tk.W, padx=(6, 0))
+        
+        skip_info = ttk.Label(
+            input_card,
+            text="Validates local files before downloading. Useful for resuming interrupted sessions or adding new memories.",
+            style="Info.TLabel"
+        )
+        skip_info.pack(anchor=tk.W, padx=(26, 0), pady=(2, 8))
+        
+        # Re-convert videos checkbox (hidden by default, shown when skip_existing is ON)
+        self.reconvert_frame = ttk.Frame(input_card, style="Card.TFrame")
+        # Don't pack yet - will be shown/hidden by _toggle_reconvert_visibility
+        
+        self.reconvert_videos = tk.BooleanVar(value=False)
+        reconvert_check = ttk.Checkbutton(
+            self.reconvert_frame,
+            text="Re-convert existing videos to H.264 if needed",
+            variable=self.reconvert_videos,
+            style="Card.TCheckbutton"
+        )
+        reconvert_check.pack(anchor=tk.W, padx=(20, 0))
+        
+        reconvert_info = ttk.Label(
+            self.reconvert_frame,
+            text="Checks codec of existing videos and re-converts non-H.264 videos for better compatibility",
+            style="Info.TLabel"
+        )
+        reconvert_info.pack(anchor=tk.W, padx=(46, 0), pady=(2, 8))
+
         # Check available conversion tools and display status
         # conversion_status = self.get_conversion_status()
         # conversion_info = ttk.Label(input_card,
@@ -1086,6 +1133,19 @@ class SnapchatDownloaderGUI:
         self.log_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar.config(command=self.log_text.yview)
     
+    def _toggle_reconvert_visibility(self):
+        """Show or hide the re-convert option based on skip_existing checkbox state."""
+        if self.skip_existing.get():
+            self.reconvert_frame.pack(anchor=tk.W, pady=(0, 8), after=self.reconvert_frame.master.winfo_children()[
+                list(self.reconvert_frame.master.winfo_children()).index(self.reconvert_frame) - 1
+                if self.reconvert_frame in self.reconvert_frame.master.winfo_children() else -1
+            ] if self.reconvert_frame.winfo_ismapped() else None)
+            # Simple approach: just pack it
+            self.reconvert_frame.pack(anchor=tk.W, pady=(0, 8))
+        else:
+            self.reconvert_frame.pack_forget()
+            self.reconvert_videos.set(False)  # Reset when hidden
+    
     def browse_json(self):
         """Open file dialog to select JSON file."""
         filename = filedialog.askopenfilename(
@@ -1141,11 +1201,20 @@ class SnapchatDownloaderGUI:
         self.log_text.see(tk.END)
         self.root.update_idletasks()
     
-    def update_progress(self, current, total):
-        """Update progress bar."""
+    def update_progress(self, current, total, is_resume_mode=False):
+        """Update progress bar.
+        
+        Args:
+            current: Current item number
+            total: Total items
+            is_resume_mode: If True, show 'Validating' instead of 'Downloading'
+        """
         progress = (current / total) * 100
         self.progress_bar['value'] = progress
-        self.status_label.config(text=f"⬇ Downloading {current} of {total}...", foreground="#00d2d3")
+        if is_resume_mode:
+            self.status_label.config(text=f"🔍 Validating {current} of {total}...", foreground="#00d2d3")
+        else:
+            self.status_label.config(text=f"⬇ Downloading {current} of {total}...", foreground="#00d2d3")
         self.root.update_idletasks()
     
     def start_download(self):
@@ -1174,10 +1243,17 @@ class SnapchatDownloaderGUI:
         # Update UI state with visual feedback
         self.is_downloading = True
         self.stop_download = False
-        self.download_btn.config(state=tk.DISABLED, text="⏳ Downloading...")
+        
+        # Show appropriate button text based on mode
+        if self.skip_existing.get():
+            self.download_btn.config(state=tk.DISABLED, text="🔍 Validating...")
+            self.status_label.config(text="🔍 Validating existing files...", foreground="#00d2d3")
+        else:
+            self.download_btn.config(state=tk.DISABLED, text="⏳ Downloading...")
+            self.status_label.config(text="🔄 Starting download...", foreground="#00d2d3")
+        
         self.stop_btn.config(state=tk.NORMAL)
         self.progress_bar['value'] = 0
-        self.status_label.config(text="🔄 Starting download...", foreground="#00d2d3")
         
         # Start download in separate thread
         thread = threading.Thread(target=self.download_thread, 
@@ -1191,6 +1267,143 @@ class SnapchatDownloaderGUI:
         self.stop_btn.config(state=tk.DISABLED, text="⏹ Stopping...")
         self.status_label.config(text="⚠ Stopping download...", foreground="#f39c12")
         self.log("⚠ Stopping download...")
+
+    def cleanup_temp_files(self, output_path):
+        """Clean up orphaned temporary files from previous interrupted runs.
+        
+        Args:
+            output_path (Path): Output directory to scan for temp files
+            
+        Note:
+            Removes files matching patterns:
+            - *.temp.mp4 (video conversion temps)
+            - *.backup (metadata backup files)
+            - *.rotated.* (portrait rotation temps)
+            - *.exif.tmp (EXIF metadata temps)
+            - *.zip (downloaded ZIP overlays)
+        """
+        temp_patterns = [
+            "*.temp.mp4",
+            "*.backup",
+            "*.rotated.*",
+            "*.exif.tmp",
+            "*.zip"
+        ]
+        
+        cleaned_count = 0
+        for pattern in temp_patterns:
+            for temp_file in output_path.glob(pattern):
+                try:
+                    temp_file.unlink()
+                    cleaned_count += 1
+                    logging.debug(f"Removed temp file: {temp_file.name}")
+                except Exception as e:
+                    logging.warning(f"Could not remove temp file {temp_file}: {e}")
+        
+        if cleaned_count > 0:
+            self.log(f"🧹 Cleaned up {cleaned_count} temporary file(s) from previous run")
+
+    def should_skip_download(self, item, output_path, idx, date_obj, extension):
+        """Determine if file download should be skipped because it already exists locally.
+        
+        Args:
+            item (dict): JSON item with media metadata
+            output_path (Path): Output directory path
+            idx (int): Item index for filename generation
+            date_obj (datetime): Parsed date object
+            extension (str): File extension (.jpg, .mp4, etc.)
+            
+        Returns:
+            tuple: (should_skip: bool, existing_path: str or None, skip_reason: str)
+                   If should_skip is True, existing_path contains the found file path
+        
+        Note:
+            This function checks multiple filename patterns because Snapchat ZIP overlay
+            files are merged and renamed to different formats:
+            - Normal downloads: YYYYMMDD_HHMMSS_idx.ext (e.g., 20230815_143022_628.mp4)
+            - Merged overlays: YYYYMMDD_HHMMSS.ext (without idx)
+            - Collision resolved: YYYYMMDD_HHMMSS_1.ext, _2.ext, etc.
+            
+            The ambiguity means we cannot definitively know which pattern a given JSON
+            item will create, so we check all possibilities and skip if ANY valid file exists.
+        """
+        date_formatted = date_obj.strftime("%Y%m%d_%H%M%S")
+        
+        # Check 1: Normal download filename (YYYYMMDD_HHMMSS_idx.ext)
+        normal_filename = f"{date_formatted}_{idx}{extension}"
+        normal_path = output_path / normal_filename
+        if normal_path.exists():
+            if validate_downloaded_file(str(normal_path)):
+                return True, str(normal_path), "normal download"
+            else:
+                logging.warning(f"Found invalid existing file, will re-download: {normal_path}")
+                return False, None, "invalid file"
+        
+        # Check 2: Merged overlay filename (YYYYMMDD_HHMMSS.ext) - no idx suffix
+        # This pattern is created when ZIP files contain -main/-overlay pairs
+        merged_base = f"{date_formatted}{extension}"
+        merged_path = output_path / merged_base
+        if merged_path.exists():
+            if validate_downloaded_file(str(merged_path)):
+                return True, str(merged_path), "merged overlay"
+            else:
+                logging.warning(f"Found invalid merged file, will re-download: {merged_path}")
+                return False, None, "invalid merged"
+        
+        # Check 3: Collision-resolved merged files (YYYYMMDD_HHMMSS_1.ext, _2.ext, ...)
+        # When multiple overlays have the same timestamp, counter suffixes are added
+        for count in range(1, 11):  # Reasonable upper bound
+            collision_name = f"{date_formatted}_{count}{extension}"
+            collision_path = output_path / collision_name
+            if collision_path.exists():
+                if validate_downloaded_file(str(collision_path)):
+                    return True, str(collision_path), f"collision-resolved merge (_{count})"
+                else:
+                    logging.warning(f"Found invalid collision file, will re-download: {collision_path}")
+                    return False, None, "invalid collision"
+        
+        # Check 4: Failed conversions directory
+        failed_path = output_path / "failed_conversions" / normal_filename
+        if failed_path.exists():
+            # Conservative: skip files that previously failed conversion
+            # User can manually delete from failed_conversions/ to retry
+            return True, str(failed_path), "previously failed conversion"
+        
+        # No existing file found - proceed with download
+        return False, None, "not found"
+
+    def check_video_codec(self, file_path):
+        """Check if video file is encoded with H.264 codec using PyAV.
+        
+        Args:
+            file_path (str): Path to video file
+            
+        Returns:
+            tuple: (is_h264: bool, codec_name: str or None)
+                   is_h264 is True if video uses H.264/AVC codec
+        
+        Note:
+            Uses PyAV (if available) to detect codec. Returns (False, None) if
+            PyAV is not available or file cannot be opened.
+        """
+        if not HAS_PYAV:
+            logging.debug("PyAV not available for codec detection")
+            return False, None
+        
+        try:
+            import av
+            container = av.open(str(file_path))
+            if container.streams.video:
+                codec_name = container.streams.video[0].codec_context.name
+                container.close()
+                # H.264 is also known as AVC
+                is_h264 = codec_name.lower() in ['h264', 'avc', 'avc1']
+                return is_h264, codec_name
+            container.close()
+        except Exception as e:
+            logging.debug(f"Could not detect codec for {file_path}: {e}")
+        
+        return False, None
 
     def process_media_item(self, idx, total, item, output_path, max_retries):
         logs = [f"[{idx}/{total}] Processing..."]
@@ -1236,185 +1449,276 @@ class SnapchatDownloaderGUI:
             log_local(f"  File: {filename}")
             log_local(f"  Type: {media_type}")
 
-            # Download file
-            download_success, merged_files = download_media(
-                download_url,
-                str(file_path),
-                max_retries=max_retries,
-                progress_callback=progress_callback,
-                date_obj=date_obj
-            )
+            # Check if we should skip download (resume mode)
+            skip_download = False
+            existing_file_path = None
+            if self.skip_existing.get():
+                should_skip, existing_path, skip_reason = self.should_skip_download(
+                    item, output_path, idx, date_obj, extension
+                )
+                if should_skip:
+                    skip_download = True
+                    existing_file_path = existing_path
+                    log_local(f"  ⏭ Skipped download (file exists: {skip_reason})")
+                    
+                    # Update file_path to point to existing file for metadata processing
+                    file_path = Path(existing_file_path)
+                    
+                    # Check if we should re-convert video
+                    if media_type == "Video" and self.reconvert_videos.get():
+                        is_h264, codec_name = self.check_video_codec(str(file_path))
+                        if not is_h264 and codec_name:
+                            log_local(f"  🔄 Video needs re-conversion (current: {codec_name})")
+                            skip_download = False  # Force conversion by not skipping
+                            existing_file_path = None
+                        elif is_h264:
+                            log_local(f"  ✓ Video already in H.264 format")
 
-            if download_success:
-                log_local("  ✓ Downloaded")
+            # Download file (or skip if already exists)
+            if not skip_download:
+                download_success, merged_files = download_media(
+                    download_url,
+                    str(file_path),
+                    max_retries=max_retries,
+                    progress_callback=progress_callback,
+                    date_obj=date_obj
+                )
 
-                # If merged files were created from ZIP overlay, apply metadata to each
-                if merged_files:
-                    log_local(f"  ℹ Processing {len(merged_files)} merged file(s) from ZIP overlay")
-                    for merged_file in merged_files:
-                        merged_path = Path(merged_file)
-                        log_local(f"  📄 {merged_path.name}")
+                if download_success:
+                    log_local("  ✓ Downloaded")
 
-                        # Determine if it's a video or image
-                        ext = merged_path.suffix.lower()
-                        is_video = ext in ['.mp4', '.mov', '.m4v', '.avi', '.mkv']
+                    # If merged files were created from ZIP overlay, apply metadata to each
+                    if merged_files:
+                        log_local(f"  ℹ Processing {len(merged_files)} merged file(s) from ZIP overlay")
+                        for merged_file in merged_files:
+                            merged_path = Path(merged_file)
+                            log_local(f"  📄 {merged_path.name}")
 
-                        if is_video:
-                            # Ensure portrait orientation for merged video
-                            try:
-                                rot_ok, rot_msg = enforce_portrait_video(str(merged_path))
-                                if rot_ok:
-                                    log_local("    ✓ Ensured portrait orientation")
-                                else:
-                                    log_local(f"    ⚠ Could not enforce portrait orientation: {rot_msg}")
-                            except Exception as e:
-                                log_local(f"    ⚠ Error enforcing portrait orientation: {e}")
+                            # Determine if it's a video or image
+                            ext = merged_path.suffix.lower()
+                            is_video = ext in ['.mp4', '.mov', '.m4v', '.avi', '.mkv']
 
-                            # Set video metadata - try ffmpeg first for better compatibility, then mutagen
-                            metadata_set = False
-
-                            # Try ffmpeg first (sets standard creation_time metadata)
-                            try:
-                                if set_video_metadata_ffmpeg(str(merged_path), date_obj, latitude, longitude):
-                                    log_local("    ✓ Set video metadata (ffmpeg)")
-                                    metadata_set = True
-                            except Exception as ffmpeg_error:
-                                log_local(f"    ℹ ffmpeg metadata setting failed, trying mutagen: {ffmpeg_error}")
-
-                            # Fall back to mutagen if ffmpeg didn't work
-                            if not metadata_set and HAS_MUTAGEN:
+                            if is_video:
+                                # Ensure portrait orientation for merged video
                                 try:
-                                    if set_video_metadata(str(merged_path), date_obj, latitude, longitude):
-                                        log_local("    ✓ Set video metadata (mutagen)")
+                                    rot_ok, rot_msg = enforce_portrait_video(str(merged_path))
+                                    if rot_ok:
+                                        log_local("    ✓ Ensured portrait orientation")
+                                    else:
+                                        log_local(f"    ⚠ Could not enforce portrait orientation: {rot_msg}")
+                                except Exception as e:
+                                    log_local(f"    ⚠ Error enforcing portrait orientation: {e}")
+
+                                # Set video metadata - try ffmpeg first for better compatibility, then mutagen
+                                metadata_set = False
+
+                                # Try ffmpeg first (sets standard creation_time metadata)
+                                try:
+                                    if set_video_metadata_ffmpeg(str(merged_path), date_obj, latitude, longitude):
+                                        log_local("    ✓ Set video metadata (ffmpeg)")
                                         metadata_set = True
-                                except Exception as metadata_error:
-                                    log_local(f"    ⚠ Metadata error: {metadata_error}")
+                                except Exception as ffmpeg_error:
+                                    log_local(f"    ℹ ffmpeg metadata setting failed, trying mutagen: {ffmpeg_error}")
 
-                            if not metadata_set:
-                                log_local("    ℹ Video metadata not set (install ffmpeg or mutagen)")
+                                # Fall back to mutagen if ffmpeg didn't work
+                                if not metadata_set and HAS_MUTAGEN:
+                                    try:
+                                        if set_video_metadata(str(merged_path), date_obj, latitude, longitude):
+                                            log_local("    ✓ Set video metadata (mutagen)")
+                                            metadata_set = True
+                                    except Exception as metadata_error:
+                                        log_local(f"    ⚠ Metadata error: {metadata_error}")
 
-                            set_file_timestamps(str(merged_path), date_obj)
-                            log_local("    ✓ Set file timestamps")
+                                if not metadata_set:
+                                    log_local("    ℹ Video metadata not set (install ffmpeg or mutagen)")
+
+                                set_file_timestamps(str(merged_path), date_obj)
+                                log_local("    ✓ Set file timestamps")
+                            else:
+                                # Set image metadata
+                                if HAS_PIEXIF and ext in ['.jpg', '.jpeg']:
+                                    try:
+                                        set_image_exif_metadata(str(merged_path), date_obj, latitude, longitude)
+                                        log_local("    ✓ Set EXIF metadata")
+                                    except Exception as exif_error:
+                                        log_local(f"    ⚠ EXIF metadata error: {exif_error}")
+                                set_file_timestamps(str(merged_path), date_obj)
+                                log_local("    ✓ Set file timestamps")
+
+                        return logs, True, False
+
+                    # Set metadata
+                    if media_type == "Image" and extension.lower() in ['.jpg', '.jpeg']:
+                        if HAS_PIEXIF:
+                            try:
+                                set_image_exif_metadata(str(file_path), date_obj, latitude, longitude)
+                                log_local("  ✓ Set EXIF metadata")
+                            except Exception as exif_error:
+                                log_local(f"  ⚠ EXIF metadata error: {exif_error}")
+                        # Always set file timestamps for images
+                        set_file_timestamps(str(file_path), date_obj)
+                    elif media_type == "Video":
+                        # Convert all videos to H.264 by default
+                        log_local("  🔄 Converting to H.264...")
+
+                        # Check if any conversion tool is available
+                        if not HAS_PYAV and not find_vlc_executable() and not HAS_VLC:
+                            log_local("  ⚠ No conversion tools available - keeping original format")
+                            log_local("  ℹ Install PyAV (pip install av) or VLC for automatic H.264 conversion")
+                            # Still count as success - video was downloaded
                         else:
-                            # Set image metadata
-                            if HAS_PIEXIF and ext in ['.jpg', '.jpeg']:
-                                try:
-                                    set_image_exif_metadata(str(merged_path), date_obj, latitude, longitude)
-                                    log_local("    ✓ Set EXIF metadata")
-                                except Exception as exif_error:
-                                    log_local(f"    ⚠ EXIF metadata error: {exif_error}")
-                            set_file_timestamps(str(merged_path), date_obj)
-                            log_local("    ✓ Set file timestamps")
+                            # Pass the custom failed_dir path
+                            failed_conversions_dir = str(output_path / "failed_conversions")
+                            try:
+                                success, result = convert_hevc_to_h264(
+                                    str(file_path),
+                                    failed_dir_path=failed_conversions_dir
+                                )
+                                if success:
+                                    log_local("  ✓ Converted to H.264")
+                                    # Replace original with converted file
+                                    try:
+                                        os.remove(str(file_path))
+                                        os.rename(result, str(file_path))
+                                        # CRITICAL: Set timestamps AFTER file replacement
+                                        set_file_timestamps(str(file_path), date_obj)
+                                        log_local("  ✓ Set file timestamps")
+                                    except Exception as rename_error:
+                                        log_local(f"  ⚠ Could not replace original: {rename_error}")
+                                        # If replacement failed but conversion succeeded, still set timestamps on original
+                                        set_file_timestamps(str(file_path), date_obj)
+                                else:
+                                    log_local(f"  ⚠ Conversion failed: {result}")
+                                    # Don't count as error - file is still downloaded in original format
+                                    # Set timestamps on original file
+                                    set_file_timestamps(str(file_path), date_obj)
+                            except Exception as conversion_error:
+                                log_local(f"  ⚠ Conversion error: {conversion_error}")
+                                # Ensure timestamps are set even if conversion crashes
+                                set_file_timestamps(str(file_path), date_obj)
+
+                        # Try to set video metadata - use ffmpeg first for better compatibility, then mutagen
+                        metadata_set = False
+
+                        # Try ffmpeg first (sets standard creation_time metadata)
+                        try:
+                            if set_video_metadata_ffmpeg(str(file_path), date_obj, latitude, longitude):
+                                log_local("  ✓ Set video metadata (ffmpeg)")
+                                metadata_set = True
+                        except Exception as ffmpeg_error:
+                            logging.debug(f"ffmpeg metadata setting failed: {ffmpeg_error}")
+
+                        # Fall back to mutagen if ffmpeg didn't work
+                        if not metadata_set and HAS_MUTAGEN:
+                            try:
+                                if set_video_metadata(str(file_path), date_obj, latitude, longitude):
+                                    log_local("  ✓ Set video metadata (mutagen)")
+                                    metadata_set = True
+                            except Exception as metadata_error:
+                                log_local(f"  ⚠ Metadata error: {metadata_error}")
+
+                        if not metadata_set:
+                            log_local("  ℹ Video downloaded (install ffmpeg or mutagen for embedded metadata)")
+
+                    # ALWAYS set file timestamps as final step for any media type
+                    # This ensures the creation/modification date is correct even if other metadata fails
+                    # Ensure portrait orientation for videos before finalizing timestamps/metadata
+                    try:
+                        if media_type == "Video":
+                            try:
+                                rot_ok, rot_msg = enforce_portrait_video(str(file_path))
+                                if rot_ok:
+                                    log_local("  ✓ Ensured portrait orientation")
+                                else:
+                                    log_local(f"  ⚠ Could not enforce portrait orientation: {rot_msg}")
+                            except Exception as e:
+                                log_local(f"  ⚠ Error enforcing portrait orientation: {e}")
+                    except Exception:
+                        pass
+
+                    try:
+                        set_file_timestamps(str(file_path), date_obj)
+                        log_local("  ✓ File date set correctly")
+                    except Exception as timestamp_error:
+                        log_local(f"  ⚠ Failed to set file timestamps: {timestamp_error}")
+
+                    # Validate the downloaded file
+                    try:
+                        if not validate_downloaded_file(str(file_path)):
+                            log_local("  ⚠ Downloaded file is corrupted or incomplete")
+                            return logs, False, True
+                    except Exception as validation_error:
+                        log_local(f"  ⚠ Validation error: {validation_error}")
 
                     return logs, True, False
 
-                # Set metadata
+                else:
+                    log_local("  ✗ Download failed")
+                    return logs, False, True
+            
+            else:
+                # File was skipped - check and update metadata if needed
+                log_local("  📋 Checking existing file metadata...")
+                metadata_updated = False
+                
+                # Set metadata based on file type
                 if media_type == "Image" and extension.lower() in ['.jpg', '.jpeg']:
                     if HAS_PIEXIF:
                         try:
-                            set_image_exif_metadata(str(file_path), date_obj, latitude, longitude)
-                            log_local("  ✓ Set EXIF metadata")
+                            # Check if EXIF update is needed by attempting to set
+                            # The function returns True if metadata was written
+                            if set_image_exif_metadata(str(file_path), date_obj, latitude, longitude):
+                                log_local("  ✓ Updated EXIF metadata")
+                                metadata_updated = True
+                            else:
+                                log_local("  ℹ EXIF metadata already present")
                         except Exception as exif_error:
                             log_local(f"  ⚠ EXIF metadata error: {exif_error}")
-                    # Always set file timestamps for images
-                    set_file_timestamps(str(file_path), date_obj)
-                elif media_type == "Video":
-                    # Convert all videos to H.264 by default
-                    log_local("  🔄 Converting to H.264...")
-
-                    # Check if any conversion tool is available
-                    if not HAS_PYAV and not find_vlc_executable() and not HAS_VLC:
-                        log_local("  ⚠ No conversion tools available - keeping original format")
-                        log_local("  ℹ Install PyAV (pip install av) or VLC for automatic H.264 conversion")
-                        # Still count as success - video was downloaded
                     else:
-                        # Pass the custom failed_dir path
-                        failed_conversions_dir = str(output_path / "failed_conversions")
-                        try:
-                            success, result = convert_hevc_to_h264(
-                                str(file_path),
-                                failed_dir_path=failed_conversions_dir
-                            )
-                            if success:
-                                log_local("  ✓ Converted to H.264")
-                                # Replace original with converted file
-                                try:
-                                    os.remove(str(file_path))
-                                    os.rename(result, str(file_path))
-                                    # CRITICAL: Set timestamps AFTER file replacement
-                                    set_file_timestamps(str(file_path), date_obj)
-                                    log_local("  ✓ Set file timestamps")
-                                except Exception as rename_error:
-                                    log_local(f"  ⚠ Could not replace original: {rename_error}")
-                                    # If replacement failed but conversion succeeded, still set timestamps on original
-                                    set_file_timestamps(str(file_path), date_obj)
-                            else:
-                                log_local(f"  ⚠ Conversion failed: {result}")
-                                # Don't count as error - file is still downloaded in original format
-                                # Set timestamps on original file
-                                set_file_timestamps(str(file_path), date_obj)
-                        except Exception as conversion_error:
-                            log_local(f"  ⚠ Conversion error: {conversion_error}")
-                            # Ensure timestamps are set even if conversion crashes
-                            set_file_timestamps(str(file_path), date_obj)
-
-                    # Try to set video metadata - use ffmpeg first for better compatibility, then mutagen
-                    metadata_set = False
-
-                    # Try ffmpeg first (sets standard creation_time metadata)
+                        log_local("  ℹ EXIF not available (piexif not installed)")
+                elif media_type == "Video":
+                    # Set video metadata - try ffmpeg first, then mutagen
+                    video_metadata_set = False
+                    
                     try:
                         if set_video_metadata_ffmpeg(str(file_path), date_obj, latitude, longitude):
-                            log_local("  ✓ Set video metadata (ffmpeg)")
-                            metadata_set = True
+                            log_local("  ✓ Updated video metadata (ffmpeg)")
+                            video_metadata_set = True
+                            metadata_updated = True
                     except Exception as ffmpeg_error:
                         logging.debug(f"ffmpeg metadata setting failed: {ffmpeg_error}")
-
-                    # Fall back to mutagen if ffmpeg didn't work
-                    if not metadata_set and HAS_MUTAGEN:
+                    
+                    if not video_metadata_set and HAS_MUTAGEN:
                         try:
                             if set_video_metadata(str(file_path), date_obj, latitude, longitude):
-                                log_local("  ✓ Set video metadata (mutagen)")
-                                metadata_set = True
+                                log_local("  ✓ Updated video metadata (mutagen)")
+                                video_metadata_set = True
+                                metadata_updated = True
                         except Exception as metadata_error:
                             log_local(f"  ⚠ Metadata error: {metadata_error}")
-
-                    if not metadata_set:
-                        log_local("  ℹ Video downloaded (install ffmpeg or mutagen for embedded metadata)")
-
-                # ALWAYS set file timestamps as final step for any media type
-                # This ensures the creation/modification date is correct even if other metadata fails
-                # Ensure portrait orientation for videos before finalizing timestamps/metadata
+                    
+                    if not video_metadata_set:
+                        log_local("  ℹ Video metadata not updated (install ffmpeg or mutagen)")
+                
+                # Check and set file timestamps
                 try:
-                    if media_type == "Video":
-                        try:
-                            rot_ok, rot_msg = enforce_portrait_video(str(file_path))
-                            if rot_ok:
-                                log_local("  ✓ Ensured portrait orientation")
-                            else:
-                                log_local(f"  ⚠ Could not enforce portrait orientation: {rot_msg}")
-                        except Exception as e:
-                            log_local(f"  ⚠ Error enforcing portrait orientation: {e}")
-                except Exception:
-                    pass
-
-                try:
-                    set_file_timestamps(str(file_path), date_obj)
-                    log_local("  ✓ File date set correctly")
+                    current_mtime = os.path.getmtime(str(file_path))
+                    expected_mtime = date_obj.timestamp()
+                    # Only update if timestamp differs by more than 1 second
+                    if abs(current_mtime - expected_mtime) > 1:
+                        set_file_timestamps(str(file_path), date_obj)
+                        log_local("  ✓ Updated file timestamps")
+                        metadata_updated = True
+                    else:
+                        log_local("  ℹ File timestamps already correct")
                 except Exception as timestamp_error:
-                    log_local(f"  ⚠ Failed to set file timestamps: {timestamp_error}")
-
-                # Validate the downloaded file
-                try:
-                    if not validate_downloaded_file(str(file_path)):
-                        log_local("  ⚠ Downloaded file is corrupted or incomplete")
-                        return logs, False, True
-                except Exception as validation_error:
-                    log_local(f"  ⚠ Validation error: {validation_error}")
-
+                    log_local(f"  ⚠ Failed to check/set file timestamps: {timestamp_error}")
+                
+                if not metadata_updated:
+                    log_local("  ✓ All metadata already correct")
+                
+                # File skip counts as success
                 return logs, True, False
-
-            log_local("  ✗ Download failed")
-            return logs, False, True
 
         except Exception as item_error:
             log_local(f"  ✗ Error processing item: {item_error}")
@@ -1443,9 +1747,16 @@ class SnapchatDownloaderGUI:
                 self.download_complete()
                 return
             
+            # Clean up temp files if resume mode is enabled
+            if self.skip_existing.get():
+                self.log("🔄 Resume mode enabled - checking for existing files")
+                self.cleanup_temp_files(output_path)
+            
             # Process each item
             success_count = 0
+            skipped_count = 0
             error_count = 0
+            has_started_downloading = False
 
             max_retries = self.max_retries.get()
             max_workers = max(1, min(self.max_threads.get(), total))
@@ -1497,12 +1808,37 @@ class SnapchatDownloaderGUI:
                         for line in logs:
                             self.log(line)
 
+                        # Check if this was a skip or actual download
+                        was_skipped = any("⏭ Skipped" in line for line in logs)
+                        
                         if success:
+                            if was_skipped:
+                                skipped_count += 1
+                            else:
+                                # Actual download occurred
+                                if not has_started_downloading:
+                                    has_started_downloading = True
+                                    # Switch UI to downloading state
+                                    self.download_btn.config(text="⬇ Downloading...")
                             success_count += 1
                         if error:
                             error_count += 1
 
-                        self.update_progress(completed_count, total)
+                        # Update progress with detailed status
+                        downloaded_count = success_count - skipped_count
+                        is_resume = self.skip_existing.get()
+                        
+                        # Only show "Validating" status if we are in resume mode AND haven't started downloading yet
+                        show_validating_status = is_resume and not has_started_downloading
+
+                        if show_validating_status:
+                            # Show detailed breakdown in resume mode
+                            self.status_label.config(
+                                text=f"✓ Validated: {completed_count}/{total} | ⬇ New: {downloaded_count} | ⏭ Skipped: {skipped_count} | ✗ Failed: {error_count}",
+                                foreground="#00d2d3"
+                            )
+                        
+                        self.update_progress(completed_count, total, is_resume_mode=show_validating_status)
                         self.log("")  # Empty line
 
                         if self.stop_download and not stop_logged:
@@ -1516,18 +1852,30 @@ class SnapchatDownloaderGUI:
                         pass
             
             # Final summary
+            downloaded_count = success_count - skipped_count
             self.log("=" * 50)
             self.log(f"Download Complete!")
-            self.log(f"Success: {success_count}")
+            if self.skip_existing.get():
+                self.log(f"Downloaded: {downloaded_count}")
+                self.log(f"Skipped: {skipped_count}")
+            else:
+                self.log(f"Success: {success_count}")
             self.log(f"Failed: {error_count}")
             self.log(f"Total: {total}")
             self.log(f"Output: {output_dir}")
             self.log("=" * 50)
             
             if not self.stop_download:
-                messagebox.showinfo("Complete", 
-                                   f"Downloaded {success_count} of {total} files\n"
-                                   f"Output: {output_dir}")
+                if self.skip_existing.get():
+                    messagebox.showinfo("Complete", 
+                                       f"Downloaded {downloaded_count} files\n"
+                                       f"Skipped {skipped_count} existing files\n"
+                                       f"Failed {error_count} files\n"
+                                       f"Output: {output_dir}")
+                else:
+                    messagebox.showinfo("Complete", 
+                                       f"Downloaded {success_count} of {total} files\n"
+                                       f"Output: {output_dir}")
             
         except Exception as e:
             self.log(f"\n✗ Error: {str(e)}")
