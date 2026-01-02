@@ -862,25 +862,8 @@ class SnapchatDownloaderGUI:
         self.is_downloading = False
         self.stop_download = False
         
-        # Timezone preference variables
-        import pytz
-        current_tz = str(pytz.timezone('UTC'))
-        try:
-            from tzlocal import get_localzone
-            current_tz = str(get_localzone())
-        except Exception:
-            try:
-                import time
-                if time.daylight:
-                    current_tz = time.tzname[1]
-                else:
-                    current_tz = time.tzname[0]
-            except Exception:
-                pass
-        
+        # Timezone preference variable
         self.use_gps_tz = tk.BooleanVar(value=True)  # Use GPS for timezone by default
-        self.fallback_tz_var = tk.StringVar(value="System")  # Fallback timezone preference
-        self.current_system_tz = current_tz  # Store current system timezone for display
         
         # Configure style
         self.setup_styles()
@@ -1168,7 +1151,7 @@ class SnapchatDownloaderGUI:
 
         gps_tz_check = ttk.Checkbutton(
             input_card,
-            text="Use GPS coordinates to determine timezone (recommended)",
+            text="Use GPS coordinates to determine local timezone (recommended)",
             variable=self.use_gps_tz,
             style="Card.TCheckbutton"
         )
@@ -1176,37 +1159,10 @@ class SnapchatDownloaderGUI:
 
         gps_tz_info = ttk.Label(
             input_card,
-            text="When enabled, uses the photo/video location to determine the correct local timezone. Falls back to system timezone for files without GPS data.",
+            text="Uses photo/video GPS location to detect local timezone. Files are named and timestamped with local time.\nWhen disabled or GPS unavailable, uses system timezone as fallback.",
             style="Info.TLabel"
         )
         gps_tz_info.pack(anchor=tk.W, padx=(26, 0), pady=(2, 8))
-
-        # Fallback timezone option
-        fallback_frame = ttk.Frame(input_card, style="Card.TFrame")
-        fallback_frame.pack(anchor=tk.W, padx=(6, 0), pady=(0, 8), fill=tk.X)
-
-        fallback_label = ttk.Label(fallback_frame, text="Fallback timezone preference:", style="Header.TLabel")
-        fallback_label.pack(anchor=tk.W)
-
-        fallback_options_frame = ttk.Frame(fallback_frame, style="Card.TFrame")
-        fallback_options_frame.pack(anchor=tk.W, padx=(20, 0), pady=(5, 0), fill=tk.X)
-
-        tz_options = ["System timezone", "UTC"]
-        fallback_combo = ttk.Combobox(
-            fallback_options_frame,
-            textvariable=self.fallback_tz_var,
-            values=tz_options,
-            state="readonly",
-            width=25
-        )
-        fallback_combo.pack(anchor=tk.W, pady=(0, 5))
-
-        system_tz_display = ttk.Label(
-            fallback_options_frame,
-            text=f"Current system timezone: {self.current_system_tz}",
-            style="Info.TLabel"
-        )
-        system_tz_display.pack(anchor=tk.W, pady=(0, 8))
 
         # Check available conversion tools and display status
         # conversion_status = self.get_conversion_status()

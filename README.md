@@ -116,11 +116,11 @@ python download_snapchat_memories_gui.py
      - Helps ensure all videos are compatible with Windows Media Player and other tools
      - Skips videos already in H.264 format to save time
    
-   **Timezone Options:**
-   - **Use GPS coordinates to determine timezone** — Recommended, enabled by default
+   **Timezone Handling:**
+   - **Use GPS coordinates to determine local timezone** — Recommended, enabled by default
      - Automatically detects local timezone from photo/video GPS location
-     - Falls back to system timezone for files without GPS data
-   - **Fallback timezone preference** — Choose between System timezone or UTC when GPS isn't available
+     - Files are named and timestamped with local time for easier organization
+     - Falls back to system timezone when GPS data is unavailable or checkbox is disabled
 
 5. **Start Download**
    - Click "Start Download"
