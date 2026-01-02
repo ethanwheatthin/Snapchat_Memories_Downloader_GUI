@@ -261,7 +261,11 @@ def merge_images(main_img_path, overlay_img_path, output_path):
 
 
 def merge_video_overlay(main_video_path, overlay_image_path, output_path):
-    """Overlay an image on top of a video using ffmpeg.
+    """Overlay an image (caption) on top of a video using ffmpeg.
+    
+    CRITICAL FIX: Uses loop filter to repeat the overlay image for the entire video duration.
+    Without this, ffmpeg takes the duration of the shortest input (1 second for a static image),
+    resulting in a 1-second output video.
 
     Returns (True, output_path) on success or (False, error_message).
     """
@@ -270,31 +274,92 @@ def merge_video_overlay(main_video_path, overlay_image_path, output_path):
             logging.warning("ffmpeg not found; cannot merge video overlay")
             return False, "ffmpeg not found"
 
-        # Build ffmpeg command to overlay image onto video (overlay at 0,0)
-        # Keep audio stream, encode video with libx264 for compatibility
+        # First, get the duration of the main video to know how long to loop the overlay
+        try:
+            probe_cmd = [
+                'ffprobe', '-v', 'error',
+                '-show_entries', 'format=duration',
+                '-of', 'default=noprint_wrappers=1:nokey=1',
+                str(main_video_path)
+            ]
+            probe_result = subprocess.run(
+                probe_cmd, capture_output=True, text=True, 
+                timeout=10, creationflags=CREATE_NO_WINDOW
+            )
+            video_duration = float(probe_result.stdout.strip())
+            logging.info(f"Main video duration: {video_duration} seconds")
+        except Exception as probe_error:
+            logging.warning(f"Could not determine video duration, using default loop: {probe_error}")
+            video_duration = None
+
+        # Build ffmpeg command with proper overlay looping
+        # Using loop filter ensures the overlay image repeats for entire video duration
+        # shortest=0 ensures output duration matches the main video, not the overlay
         cmd = [
             'ffmpeg', '-y',
-            '-i', str(main_video_path),
+            '-stream_loop', '-1',  # Loop the overlay image indefinitely
             '-i', str(overlay_image_path),
-            '-filter_complex', 'overlay=0:0',
+            '-i', str(main_video_path),
+            '-filter_complex', '[0:v]loop=loop=-1:size=1:start=0[overlay];[1:v][overlay]overlay=0:0:shortest=1[outv]',
+            '-map', '[outv]',
+            '-map', '1:a?',  # Copy audio from main video if it exists
             '-c:a', 'copy',
             '-c:v', 'libx264', '-crf', '18', '-preset', 'veryfast',
             str(output_path)
         ]
 
         logging.info(f"Running ffmpeg to merge video overlay: {' '.join(cmd)}")
+        logging.info(f"Input video: {main_video_path}")
+        logging.info(f"Overlay image: {overlay_image_path}")
+        logging.info(f"Output path: {output_path}")
+        
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300, creationflags=CREATE_NO_WINDOW)
+        
         if proc.returncode != 0:
-            logging.error(f"ffmpeg failed: {proc.stderr}")
+            logging.error(f"ffmpeg overlay merge failed with return code {proc.returncode}")
+            logging.error(f"ffmpeg stderr: {proc.stderr}")
+            logging.error(f"ffmpeg stdout: {proc.stdout}")
             return False, proc.stderr
 
         # Verify output exists and has reasonable size
-        if os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
-            return True, str(output_path)
+        if os.path.exists(output_path):
+            output_size = os.path.getsize(output_path)
+            logging.info(f"Merged video created: {output_path} ({output_size} bytes)")
+            
+            if output_size > 1000:
+                # Additional verification: check duration of output video
+                try:
+                    verify_cmd = [
+                        'ffprobe', '-v', 'error',
+                        '-show_entries', 'format=duration',
+                        '-of', 'default=noprint_wrappers=1:nokey=1',
+                        str(output_path)
+                    ]
+                    verify_result = subprocess.run(
+                        verify_cmd, capture_output=True, text=True,
+                        timeout=10, creationflags=CREATE_NO_WINDOW
+                    )
+                    output_duration = float(verify_result.stdout.strip())
+                    logging.info(f"Output video duration: {output_duration} seconds")
+                    
+                    if video_duration and output_duration < (video_duration * 0.9):
+                        logging.warning(
+                            f"Output duration ({output_duration}s) is significantly shorter "
+                            f"than input ({video_duration}s) - possible merge issue"
+                        )
+                except Exception as verify_error:
+                    logging.debug(f"Could not verify output duration: {verify_error}")
+                
+                return True, str(output_path)
+            else:
+                logging.error(f"Output file too small: {output_size} bytes")
+                return False, f"ffmpeg produced file that is too small ({output_size} bytes)"
         else:
+            logging.error("ffmpeg did not produce output file")
             return False, "ffmpeg did not produce output file"
-
+            
     except subprocess.TimeoutExpired:
+        logging.error("ffmpeg overlay merge timed out after 300 seconds")
         return False, "ffmpeg timeout"
     except Exception as e:
         logging.error(f"Error merging video overlay: {e}", exc_info=True)
