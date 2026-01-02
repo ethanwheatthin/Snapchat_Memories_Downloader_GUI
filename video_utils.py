@@ -150,7 +150,16 @@ def convert_with_vlc_subprocess(input_path, output_path):
         return False, "VLC subprocess conversion failed"
 
 
-def set_video_metadata(file_path, date_obj, latitude, longitude):
+def set_video_metadata(file_path, date_obj, latitude, longitude, timezone_offset=None):
+    """Set video metadata using mutagen (MP4).
+    
+    Args:
+        file_path: Path to the MP4 video file
+        date_obj: datetime object with timezone info (local time)
+        latitude: GPS latitude (or None)
+        longitude: GPS longitude (or None)
+        timezone_offset: Timezone offset string like '-05:00'
+    """
     if not HAS_MUTAGEN:
         logging.debug("Skipping video metadata: mutagen not available")
         return False
@@ -165,7 +174,11 @@ def set_video_metadata(file_path, date_obj, latitude, longitude):
         shutil.copy2(file_path, backup_path)
         try:
             video = MP4(file_path)
-            creation_time = date_obj.strftime("%Y-%m-%dT%H:%M:%SZ")
+            # Format with timezone offset for better app compatibility
+            if timezone_offset:
+                creation_time = date_obj.strftime("%Y-%m-%dT%H:%M:%S") + timezone_offset
+            else:
+                creation_time = date_obj.strftime("%Y-%m-%dT%H:%M:%SZ")
             video["\xa9day"] = creation_time
             try:
                 video["\xa9ART"] = date_obj.strftime("%Y")
@@ -217,7 +230,16 @@ def set_video_metadata(file_path, date_obj, latitude, longitude):
         return False
 
 
-def set_video_metadata_ffmpeg(file_path, date_obj, latitude, longitude):
+def set_video_metadata_ffmpeg(file_path, date_obj, latitude, longitude, timezone_offset=None):
+    """Set video metadata using ffmpeg.
+    
+    Args:
+        file_path: Path to the video file
+        date_obj: datetime object with timezone info (local time)
+        latitude: GPS latitude (or None)
+        longitude: GPS longitude (or None)
+        timezone_offset: Timezone offset string like '-05:00'
+    """
     if not check_ffmpeg():
         logging.debug("ffmpeg not available for metadata writing")
         return False
@@ -225,7 +247,12 @@ def set_video_metadata_ffmpeg(file_path, date_obj, latitude, longitude):
     temp_output = None
     try:
         temp_output = f"{file_path}.temp.mp4"
-        creation_time_str = date_obj.strftime("%Y-%m-%dT%H:%M:%S")
+        # Format with timezone offset
+        if timezone_offset:
+            creation_time_str = date_obj.strftime("%Y-%m-%dT%H:%M:%S") + timezone_offset
+        else:
+            creation_time_str = date_obj.strftime("%Y-%m-%dT%H:%M:%S")
+        
         cmd = ['ffmpeg', '-y', '-i', str(file_path), '-c', 'copy', '-metadata', f'creation_time={creation_time_str}', '-metadata', f'date={creation_time_str}']
         
         # Add location metadata if available

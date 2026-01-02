@@ -7,7 +7,10 @@ pyinstaller --onefile --windowed --name=SnapchatMemoriesDownloader ^
   --hidden-import=piexif ^
   --hidden-import=PIL ^
   --hidden-import=PIL.Image ^
+  --hidden-import=timezonefinder ^
+  --hidden-import=pytz ^
   --collect-all=av ^
+  --collect-data=timezonefinder ^
   --noconsole download_snapchat_memories_gui.py
 
 echo.

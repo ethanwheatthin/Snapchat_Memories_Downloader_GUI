@@ -4,3 +4,5 @@ piexif
 mutagen
 av
 python-vlc
+timezonefinder>=6.0.0
+pytz>=2021.3

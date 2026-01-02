@@ -104,7 +104,9 @@ python download_snapchat_memories_gui.py
    ![Select Output Directory](images/Output_directory.png)
    ![Application with Paths Selected](images/application_screen_with_paths.png)
 
-4. **Configure Resume Options (Optional)**
+4. **Configure Options (Optional)**
+   
+   **Resume Options:**
    - **Skip existing files (resume mode)** — Enable this to avoid re-downloading files that already exist
      - Useful when resuming after an interruption or adding new memories
      - Validates existing files and only downloads what's missing
@@ -113,6 +115,12 @@ python download_snapchat_memories_gui.py
      - Checks codec of existing videos and re-converts non-H.264 videos
      - Helps ensure all videos are compatible with Windows Media Player and other tools
      - Skips videos already in H.264 format to save time
+   
+   **Timezone Options:**
+   - **Use GPS coordinates to determine timezone** — Recommended, enabled by default
+     - Automatically detects local timezone from photo/video GPS location
+     - Falls back to system timezone for files without GPS data
+   - **Fallback timezone preference** — Choose between System timezone or UTC when GPS isn't available
 
 5. **Start Download**
    - Click "Start Download"
@@ -135,20 +143,26 @@ python download_snapchat_memories_gui.py
 
 ### Metadata Features
 
-- Creation date/time preservation
-- GPS coordinates (when available)
-- File modification timestamps match creation dates
-- Automatic overlay/caption merging for `-main` and `-overlay` file pairs
+- **Timezone-aware timestamps** — Uses GPS coordinates to determine correct local time (falls back to system timezone)
+- **Creation date/time preservation** — Embedded in EXIF (images) and file metadata (videos)
+- **GPS coordinates** — Embedded when available in original memory
+- **Timezone offset tags** — EXIF 2.31 standard offset fields for proper timezone display
+- **File modification timestamps** — Match local creation time for correct sorting in file managers
+- **Automatic overlay/caption merging** — Combines `-main` and `-overlay` file pairs seamlessly
 
 ### Dependencies
 
 Core libraries:
 - `requests` — Network downloads
 - `Pillow` — Image processing
-- `piexif` — EXIF metadata
-- `mutagen` — Video metadata
-- `av` (PyAV) — Video processing
-- `python-vlc` — VLC integration
+- `piexif` — EXIF metadata (optional but recommended)
+- `mutagen` — Video metadata (optional but recommended)
+- `av` (PyAV) — Video processing (optional)
+- `python-vlc` — VLC integration (optional)
+- `timezonefinder` — GPS-based timezone detection (optional but recommended)
+- `pytz` — Timezone handling (optional but recommended)
+
+> **Note:** The application gracefully handles missing optional packages. If timezone libraries aren't installed, timestamps default to UTC. If EXIF/video metadata libraries are missing, files are still downloaded but without embedded metadata.
 
 ### Optional Tools
 

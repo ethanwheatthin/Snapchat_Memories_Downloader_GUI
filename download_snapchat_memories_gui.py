@@ -89,9 +89,9 @@ def decimal_to_dms(decimal):
     return snap_utils.decimal_to_dms(decimal)
 
 
-def set_image_exif_metadata(file_path, date_obj, latitude, longitude):
+def set_image_exif_metadata(file_path, date_obj, latitude, longitude, timezone_offset=None):
     """Set EXIF metadata for image files. Delegates to exif_utils."""
-    return exif_utils.set_image_exif_metadata(file_path, date_obj, latitude, longitude)
+    return exif_utils.set_image_exif_metadata(file_path, date_obj, latitude, longitude, timezone_offset)
 
 def check_ffmpeg():
     """Check if ffmpeg is available on the system. Delegates to video_utils."""
@@ -190,13 +190,13 @@ def convert_with_vlc_subprocess(input_path, output_path):
                 pass
         return video_utils.convert_with_vlc_subprocess(input_path, output_path)
 
-def set_video_metadata(file_path, date_obj, latitude, longitude):
+def set_video_metadata(file_path, date_obj, latitude, longitude, timezone_offset=None):
     """Set metadata for video files. Delegates to video_utils."""
-    return video_utils.set_video_metadata(file_path, date_obj, latitude, longitude)
+    return video_utils.set_video_metadata(file_path, date_obj, latitude, longitude, timezone_offset)
 
-def set_video_metadata_ffmpeg(file_path, date_obj, latitude, longitude):
+def set_video_metadata_ffmpeg(file_path, date_obj, latitude, longitude, timezone_offset=None):
     """Set video metadata using ffmpeg if available. Delegates to video_utils."""
-    return video_utils.set_video_metadata_ffmpeg(file_path, date_obj, latitude, longitude)
+    return video_utils.set_video_metadata_ffmpeg(file_path, date_obj, latitude, longitude, timezone_offset)
 
 def set_file_timestamps(file_path, date_obj):
     """Set file modification and access times. Delegates to snap_utils."""
@@ -862,6 +862,26 @@ class SnapchatDownloaderGUI:
         self.is_downloading = False
         self.stop_download = False
         
+        # Timezone preference variables
+        import pytz
+        current_tz = str(pytz.timezone('UTC'))
+        try:
+            from tzlocal import get_localzone
+            current_tz = str(get_localzone())
+        except Exception:
+            try:
+                import time
+                if time.daylight:
+                    current_tz = time.tzname[1]
+                else:
+                    current_tz = time.tzname[0]
+            except Exception:
+                pass
+        
+        self.use_gps_tz = tk.BooleanVar(value=True)  # Use GPS for timezone by default
+        self.fallback_tz_var = tk.StringVar(value="System")  # Fallback timezone preference
+        self.current_system_tz = current_tz  # Store current system timezone for display
+        
         # Configure style
         self.setup_styles()
         
@@ -1141,6 +1161,52 @@ class SnapchatDownloaderGUI:
             style="Info.TLabel"
         )
         reconvert_info.pack(anchor=tk.W, padx=(46, 0), pady=(2, 8))
+
+        # Timezone options section
+        tz_header = ttk.Label(input_card, text="Timezone Handling", style="Header.TLabel")
+        tz_header.pack(anchor=tk.W, pady=(15, 8))
+
+        gps_tz_check = ttk.Checkbutton(
+            input_card,
+            text="Use GPS coordinates to determine timezone (recommended)",
+            variable=self.use_gps_tz,
+            style="Card.TCheckbutton"
+        )
+        gps_tz_check.pack(anchor=tk.W, padx=(6, 0))
+
+        gps_tz_info = ttk.Label(
+            input_card,
+            text="When enabled, uses the photo/video location to determine the correct local timezone. Falls back to system timezone for files without GPS data.",
+            style="Info.TLabel"
+        )
+        gps_tz_info.pack(anchor=tk.W, padx=(26, 0), pady=(2, 8))
+
+        # Fallback timezone option
+        fallback_frame = ttk.Frame(input_card, style="Card.TFrame")
+        fallback_frame.pack(anchor=tk.W, padx=(6, 0), pady=(0, 8), fill=tk.X)
+
+        fallback_label = ttk.Label(fallback_frame, text="Fallback timezone preference:", style="Header.TLabel")
+        fallback_label.pack(anchor=tk.W)
+
+        fallback_options_frame = ttk.Frame(fallback_frame, style="Card.TFrame")
+        fallback_options_frame.pack(anchor=tk.W, padx=(20, 0), pady=(5, 0), fill=tk.X)
+
+        tz_options = ["System timezone", "UTC"]
+        fallback_combo = ttk.Combobox(
+            fallback_options_frame,
+            textvariable=self.fallback_tz_var,
+            values=tz_options,
+            state="readonly",
+            width=25
+        )
+        fallback_combo.pack(anchor=tk.W, pady=(0, 5))
+
+        system_tz_display = ttk.Label(
+            fallback_options_frame,
+            text=f"Current system timezone: {self.current_system_tz}",
+            style="Info.TLabel"
+        )
+        system_tz_display.pack(anchor=tk.W, pady=(0, 8))
 
         # Check available conversion tools and display status
         # conversion_status = self.get_conversion_status()
@@ -1504,9 +1570,27 @@ class SnapchatDownloaderGUI:
                 log_local(f"  📍 Location: {latitude}, {longitude}")
             else:
                 log_local("  📍 No location data available")
+            
+            # Convert UTC to local timezone using GPS coordinates or system timezone
+            try:
+                # Determine whether to force system timezone based on GUI setting
+                force_system_tz = not self.use_gps_tz.get() or self.fallback_tz_var.get() == "UTC"
+                
+                local_dt, tz_name, tz_offset = snap_utils.convert_to_local_timezone(
+                    date_obj, 
+                    latitude, 
+                    longitude,
+                    force_system_tz=force_system_tz
+                )
+                date_obj_local = local_dt  # Use local time for filenames and metadata
+                log_local(f"  🌍 Timezone: {tz_name} ({tz_offset})")
+            except Exception as e:
+                logging.warning(f"Timezone conversion failed, using UTC: {e}")
+                date_obj_local = date_obj
+                tz_offset = "+00:00"
 
             # Generate filename
-            date_formatted = date_obj.strftime("%Y%m%d_%H%M%S")
+            date_formatted = date_obj_local.strftime("%Y%m%d_%H%M%S")
             extension = get_file_extension(media_type)
             filename = f"{date_formatted}_{idx}{extension}"
             file_path = output_path / filename
@@ -1579,7 +1663,7 @@ class SnapchatDownloaderGUI:
 
                                 # Try ffmpeg first (sets standard creation_time metadata)
                                 try:
-                                    if set_video_metadata_ffmpeg(str(merged_path), date_obj, latitude, longitude):
+                                    if set_video_metadata_ffmpeg(str(merged_path), date_obj_local, latitude, longitude, tz_offset):
                                         log_local("    ✓ Set video metadata (ffmpeg)")
                                         metadata_set = True
                                 except Exception as ffmpeg_error:
@@ -1588,7 +1672,7 @@ class SnapchatDownloaderGUI:
                                 # Fall back to mutagen if ffmpeg didn't work
                                 if not metadata_set and HAS_MUTAGEN:
                                     try:
-                                        if set_video_metadata(str(merged_path), date_obj, latitude, longitude):
+                                        if set_video_metadata(str(merged_path), date_obj_local, latitude, longitude, tz_offset):
                                             log_local("    ✓ Set video metadata (mutagen)")
                                             metadata_set = True
                                     except Exception as metadata_error:
@@ -1597,17 +1681,17 @@ class SnapchatDownloaderGUI:
                                 if not metadata_set:
                                     log_local("    ℹ Video metadata not set (install ffmpeg or mutagen)")
 
-                                set_file_timestamps(str(merged_path), date_obj)
+                                set_file_timestamps(str(merged_path), date_obj_local)
                                 log_local("    ✓ Set file timestamps")
                             else:
                                 # Set image metadata
                                 if HAS_PIEXIF and ext in ['.jpg', '.jpeg']:
                                     try:
-                                        set_image_exif_metadata(str(merged_path), date_obj, latitude, longitude)
+                                        set_image_exif_metadata(str(merged_path), date_obj_local, latitude, longitude, tz_offset)
                                         log_local("    ✓ Set EXIF metadata")
                                     except Exception as exif_error:
                                         log_local(f"    ⚠ EXIF metadata error: {exif_error}")
-                                set_file_timestamps(str(merged_path), date_obj)
+                                set_file_timestamps(str(merged_path), date_obj_local)
                                 log_local("    ✓ Set file timestamps")
 
                         return logs, True, False
@@ -1616,12 +1700,12 @@ class SnapchatDownloaderGUI:
                     if media_type == "Image" and extension.lower() in ['.jpg', '.jpeg']:
                         if HAS_PIEXIF:
                             try:
-                                set_image_exif_metadata(str(file_path), date_obj, latitude, longitude)
+                                set_image_exif_metadata(str(file_path), date_obj_local, latitude, longitude, tz_offset)
                                 log_local("  ✓ Set EXIF metadata")
                             except Exception as exif_error:
                                 log_local(f"  ⚠ EXIF metadata error: {exif_error}")
                         # Always set file timestamps for images
-                        set_file_timestamps(str(file_path), date_obj)
+                        set_file_timestamps(str(file_path), date_obj_local)
                     elif media_type == "Video":
                         # Convert all videos to H.264 by default
                         log_local("  🔄 Converting to H.264...")
@@ -1667,7 +1751,7 @@ class SnapchatDownloaderGUI:
 
                         # Try ffmpeg first (sets standard creation_time metadata)
                         try:
-                            if set_video_metadata_ffmpeg(str(file_path), date_obj, latitude, longitude):
+                            if set_video_metadata_ffmpeg(str(file_path), date_obj_local, latitude, longitude, tz_offset):
                                 log_local("  ✓ Set video metadata (ffmpeg)")
                                 metadata_set = True
                         except Exception as ffmpeg_error:
@@ -1676,7 +1760,7 @@ class SnapchatDownloaderGUI:
                         # Fall back to mutagen if ffmpeg didn't work
                         if not metadata_set and HAS_MUTAGEN:
                             try:
-                                if set_video_metadata(str(file_path), date_obj, latitude, longitude):
+                                if set_video_metadata(str(file_path), date_obj_local, latitude, longitude, tz_offset):
                                     log_local("  ✓ Set video metadata (mutagen)")
                                     metadata_set = True
                             except Exception as metadata_error:
@@ -1732,7 +1816,7 @@ class SnapchatDownloaderGUI:
                         try:
                             # Check if EXIF update is needed by attempting to set
                             # The function returns True if metadata was written
-                            if set_image_exif_metadata(str(file_path), date_obj, latitude, longitude):
+                            if set_image_exif_metadata(str(file_path), date_obj_local, latitude, longitude, tz_offset):
                                 log_local("  ✓ Updated EXIF metadata")
                                 metadata_updated = True
                             else:
@@ -1746,7 +1830,7 @@ class SnapchatDownloaderGUI:
                     video_metadata_set = False
                     
                     try:
-                        if set_video_metadata_ffmpeg(str(file_path), date_obj, latitude, longitude):
+                        if set_video_metadata_ffmpeg(str(file_path), date_obj_local, latitude, longitude, tz_offset):
                             log_local("  ✓ Updated video metadata (ffmpeg)")
                             video_metadata_set = True
                             metadata_updated = True
@@ -1755,7 +1839,7 @@ class SnapchatDownloaderGUI:
                     
                     if not video_metadata_set and HAS_MUTAGEN:
                         try:
-                            if set_video_metadata(str(file_path), date_obj, latitude, longitude):
+                            if set_video_metadata(str(file_path), date_obj_local, latitude, longitude, tz_offset):
                                 log_local("  ✓ Updated video metadata (mutagen)")
                                 video_metadata_set = True
                                 metadata_updated = True
@@ -1816,6 +1900,12 @@ class SnapchatDownloaderGUI:
             if self.skip_existing.get():
                 self.log("🔄 Resume mode enabled - checking for existing files")
                 self.cleanup_temp_files(output_path)
+            
+            # Log timezone settings
+            if self.use_gps_tz.get():
+                self.log("🌍 Timezone mode: Using GPS coordinates (falls back to system timezone)")
+            else:
+                self.log("🌍 Timezone mode: Using system/fallback timezone")
             
             # Process each item
             success_count = 0
