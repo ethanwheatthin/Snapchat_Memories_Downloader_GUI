@@ -55,7 +55,7 @@ def convert_to_local_timezone(utc_datetime, latitude, longitude, force_system_tz
     if not HAS_TIMEZONE_SUPPORT:
         logging.debug("Timezone support not available, using UTC: %s", _TIMEZONE_IMPORT_ERROR)
         offset_str = utc_datetime.strftime("%z")
-        offset_str = offset_str[:-2] + ":" + offset_str[-2:] if offset_str else "+00:00"
+        offset_str = (offset_str[:-2] + ":" + offset_str[-2:]) if len(offset_str) >= 5 else "+00:00"
         return utc_datetime, "UTC", offset_str
     
     # Try GPS-based timezone lookup if coordinates are available
@@ -67,7 +67,7 @@ def convert_to_local_timezone(utc_datetime, latitude, longitude, force_system_tz
                 local_tz = pytz.timezone(tz_name)
                 local_dt = utc_datetime.astimezone(local_tz)
                 offset_str = local_dt.strftime("%z")
-                offset_str = offset_str[:-2] + ":" + offset_str[-2:] if offset_str else "+00:00"
+                offset_str = (offset_str[:-2] + ":" + offset_str[-2:]) if len(offset_str) >= 5 else "+00:00"
                 logging.debug(
                     "Converted %s UTC to %s (%s) using GPS coordinates (%.4f, %.4f)",
                     utc_datetime.strftime("%Y-%m-%d %H:%M:%S"),
@@ -93,7 +93,7 @@ def convert_to_local_timezone(utc_datetime, latitude, longitude, force_system_tz
         
         local_dt = utc_datetime.astimezone(local_tz)
         offset_str = local_dt.strftime("%z")
-        offset_str = offset_str[:-2] + ":" + offset_str[-2:] if offset_str else "+00:00"
+        offset_str = (offset_str[:-2] + ":" + offset_str[-2:]) if len(offset_str) >= 5 else "+00:00"
         tz_name = str(local_tz)
         logging.debug(
             "Converted %s UTC to system timezone %s (%s)",

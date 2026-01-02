@@ -69,7 +69,7 @@ def set_image_exif_metadata(file_path, date_obj, latitude, longitude, timezone_o
             try:
                 exif_dict["Exif"][piexif.ExifIFD.OffsetTimeOriginal] = offset_bytes
                 exif_dict["Exif"][piexif.ExifIFD.OffsetTimeDigitized] = offset_bytes
-                exif_dict["0th"][piexif.ImageIFD.OffsetTime] = offset_bytes
+                # Note: OffsetTime is only valid in Exif IFD, not ImageIFD, so we skip 0th dictionary
                 logging.debug("Added timezone offset to EXIF: %s", timezone_offset)
             except Exception as e:
                 logging.debug("Could not add timezone offset tags to EXIF: %s", e)
