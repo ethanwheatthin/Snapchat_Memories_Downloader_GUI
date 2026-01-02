@@ -1,12 +1,31 @@
 import os
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 
 def parse_date(date_str):
-    """Parse date string from JSON format to datetime object."""
-    return datetime.strptime(date_str, "%Y-%m-%d %H:%M:%S UTC")
+    """Parse date string from JSON format to timezone-aware datetime object.
+    
+    CRITICAL FIX: Creates timezone-aware UTC datetime to prevent timezone offset bugs.
+    Previously created naive datetime which Python interpreted as local time when
+    calling timestamp(), causing 1-hour offset in DST-observing timezones.
+    
+    Args:
+        date_str: Date string in format "YYYY-MM-DD HH:MM:SS UTC"
+        
+    Returns:
+        datetime: Timezone-aware datetime object in UTC
+    """
+    # Parse the date string (ignoring the literal 'UTC' suffix)
+    naive_dt = datetime.strptime(date_str, "%Y-%m-%d %H:%M:%S UTC")
+    
+    # Convert to timezone-aware UTC datetime
+    # This ensures timestamp() returns correct Unix timestamp regardless of local timezone
+    aware_dt = naive_dt.replace(tzinfo=timezone.utc)
+    
+    logging.debug(f"Parsed date: {date_str} -> {aware_dt} (UTC timestamp: {aware_dt.timestamp()})")
+    return aware_dt
 
 
 def parse_location(location_str):
