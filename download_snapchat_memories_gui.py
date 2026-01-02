@@ -1573,8 +1573,9 @@ class SnapchatDownloaderGUI:
             
             # Convert UTC to local timezone using GPS coordinates or system timezone
             try:
-                # Determine whether to force system timezone based on GUI setting
-                force_system_tz = not self.use_gps_tz.get() or self.fallback_tz_var.get() == "UTC"
+                # Only force system timezone if GPS option is disabled
+                # (fallback preference is used automatically when GPS lookup fails)
+                force_system_tz = not self.use_gps_tz.get()
                 
                 local_dt, tz_name, tz_offset = snap_utils.convert_to_local_timezone(
                     date_obj, 
@@ -1730,21 +1731,21 @@ class SnapchatDownloaderGUI:
                                         os.remove(str(file_path))
                                         os.rename(result, str(file_path))
                                         # CRITICAL: Set timestamps AFTER file replacement
-                                        set_file_timestamps(str(file_path), date_obj)
+                                        set_file_timestamps(str(file_path), date_obj_local)
                                         log_local("  ✓ Set file timestamps")
                                     except Exception as rename_error:
                                         log_local(f"  ⚠ Could not replace original: {rename_error}")
                                         # If replacement failed but conversion succeeded, still set timestamps on original
-                                        set_file_timestamps(str(file_path), date_obj)
+                                        set_file_timestamps(str(file_path), date_obj_local)
                                 else:
                                     log_local(f"  ⚠ Conversion failed: {result}")
                                     # Don't count as error - file is still downloaded in original format
                                     # Set timestamps on original file
-                                    set_file_timestamps(str(file_path), date_obj)
+                                    set_file_timestamps(str(file_path), date_obj_local)
                             except Exception as conversion_error:
                                 log_local(f"  ⚠ Conversion error: {conversion_error}")
                                 # Ensure timestamps are set even if conversion crashes
-                                set_file_timestamps(str(file_path), date_obj)
+                                set_file_timestamps(str(file_path), date_obj_local)
 
                         # Try to set video metadata - use ffmpeg first for better compatibility, then mutagen
                         metadata_set = False
@@ -1786,7 +1787,7 @@ class SnapchatDownloaderGUI:
                         pass
 
                     try:
-                        set_file_timestamps(str(file_path), date_obj)
+                        set_file_timestamps(str(file_path), date_obj_local)
                         log_local("  ✓ File date set correctly")
                     except Exception as timestamp_error:
                         log_local(f"  ⚠ Failed to set file timestamps: {timestamp_error}")
@@ -1852,10 +1853,10 @@ class SnapchatDownloaderGUI:
                 # Check and set file timestamps
                 try:
                     current_mtime = os.path.getmtime(str(file_path))
-                    expected_mtime = date_obj.timestamp()
+                    expected_mtime = date_obj_local.timestamp()
                     # Only update if timestamp differs by more than 1 second
                     if abs(current_mtime - expected_mtime) > 1:
-                        set_file_timestamps(str(file_path), date_obj)
+                        set_file_timestamps(str(file_path), date_obj_local)
                         log_local("  ✓ Updated file timestamps")
                         metadata_updated = True
                     else:
