@@ -1390,14 +1390,15 @@ class SnapchatDownloaderGUI:
         if cleaned_count > 0:
             self.log(f"🧹 Cleaned up {cleaned_count} temporary file(s) from previous run")
 
-    def should_skip_download(self, item, output_path, idx, date_obj, extension):
+    def should_skip_download(self, item, output_path, idx, date_obj, date_obj_local, extension):
         """Determine if file download should be skipped because it already exists locally.
         
         Args:
             item (dict): JSON item with media metadata
             output_path (Path): Output directory path
             idx (int): Item index for filename generation
-            date_obj (datetime): Parsed date object
+            date_obj (datetime): Parsed UTC date object (for backward compatibility checks)
+            date_obj_local (datetime): Parsed local timezone date object (for new downloads)
             extension (str): File extension (.jpg, .mp4, etc.)
             
         Returns:
@@ -1413,44 +1414,58 @@ class SnapchatDownloaderGUI:
             
             The ambiguity means we cannot definitively know which pattern a given JSON
             item will create, so we check all possibilities and skip if ANY valid file exists.
+            
+            For timezone compatibility, checks both:
+            - Local timezone pattern (new behavior): files named with local time
+            - UTC timezone pattern (legacy): files downloaded before timezone fix
         """
-        date_formatted = date_obj.strftime("%Y%m%d_%H%M%S")
+        # Generate both local and UTC formatted dates for backward compatibility
+        date_formatted_local = date_obj_local.strftime("%Y%m%d_%H%M%S")
+        date_formatted_utc = date_obj.strftime("%Y%m%d_%H%M%S")
+        
+        # We'll check patterns for both local (preferred) and UTC (legacy) timestamps
+        date_patterns = [date_formatted_local]
+        if date_formatted_utc != date_formatted_local:  # Only check UTC if different
+            date_patterns.append(date_formatted_utc)
         
         # Check 1: Normal download filename (YYYYMMDD_HHMMSS_idx.ext)
-        normal_filename = f"{date_formatted}_{idx}{extension}"
-        normal_path = output_path / normal_filename
-        if normal_path.exists():
-            if validate_downloaded_file(str(normal_path)):
-                return True, str(normal_path), "normal download"
-            else:
-                logging.warning(f"Found invalid existing file, will re-download: {normal_path}")
-                return False, None, "invalid file"
-        
-        # Check 2: Merged overlay filename (YYYYMMDD_HHMMSS.ext) - no idx suffix
-        # This pattern is created when ZIP files contain -main/-overlay pairs
-        merged_base = f"{date_formatted}{extension}"
-        merged_path = output_path / merged_base
-        if merged_path.exists():
-            if validate_downloaded_file(str(merged_path)):
-                return True, str(merged_path), "merged overlay"
-            else:
-                logging.warning(f"Found invalid merged file, will re-download: {merged_path}")
-                return False, None, "invalid merged"
-        
-        # Check 3: Collision-resolved merged files (YYYYMMDD_HHMMSS_1.ext, _2.ext, ...)
-        # When multiple overlays have the same timestamp, counter suffixes are added
-        for count in range(1, 11):  # Reasonable upper bound
-            collision_name = f"{date_formatted}_{count}{extension}"
-            collision_path = output_path / collision_name
-            if collision_path.exists():
-                if validate_downloaded_file(str(collision_path)):
-                    return True, str(collision_path), f"collision-resolved merge (_{count})"
+        # Check both local and UTC patterns for backward compatibility
+        for date_formatted in date_patterns:
+            normal_filename = f"{date_formatted}_{idx}{extension}"
+            normal_path = output_path / normal_filename
+            if normal_path.exists():
+                if validate_downloaded_file(str(normal_path)):
+                    return True, str(normal_path), "normal download"
                 else:
-                    logging.warning(f"Found invalid collision file, will re-download: {collision_path}")
-                    return False, None, "invalid collision"
+                    logging.warning(f"Found invalid existing file, will re-download: {normal_path}")
+                    return False, None, "invalid file"
+            
+            # Check 2: Merged overlay filename (YYYYMMDD_HHMMSS.ext) - no idx suffix
+            # This pattern is created when ZIP files contain -main/-overlay pairs
+            merged_base = f"{date_formatted}{extension}"
+            merged_path = output_path / merged_base
+            if merged_path.exists():
+                if validate_downloaded_file(str(merged_path)):
+                    return True, str(merged_path), "merged overlay"
+                else:
+                    logging.warning(f"Found invalid merged file, will re-download: {merged_path}")
+                    return False, None, "invalid merged"
+            
+            # Check 3: Collision-resolved merged files (YYYYMMDD_HHMMSS_1.ext, _2.ext, ...)
+            # When multiple overlays have the same timestamp, counter suffixes are added
+            for count in range(1, 11):  # Reasonable upper bound
+                collision_name = f"{date_formatted}_{count}{extension}"
+                collision_path = output_path / collision_name
+                if collision_path.exists():
+                    if validate_downloaded_file(str(collision_path)):
+                        return True, str(collision_path), f"collision-resolved merge (_{count})"
+                    else:
+                        logging.warning(f"Found invalid collision file, will re-download: {collision_path}")
+                        return False, None, "invalid collision"
         
-        # Check 4: Failed conversions directory
-        failed_path = output_path / "failed_conversions" / normal_filename
+        # Check 4: Failed conversions directory (use local timezone pattern)
+        normal_filename_local = f"{date_formatted_local}_{idx}{extension}"
+        failed_path = output_path / "failed_conversions" / normal_filename_local
         if failed_path.exists():
             # Conservative: skip files that previously failed conversion
             # User can manually delete from failed_conversions/ to retry
@@ -1560,7 +1575,7 @@ class SnapchatDownloaderGUI:
             existing_file_path = None
             if self.skip_existing.get():
                 should_skip, existing_path, skip_reason = self.should_skip_download(
-                    item, output_path, idx, date_obj, extension
+                    item, output_path, idx, date_obj, date_obj_local, extension
                 )
                 if should_skip:
                     skip_download = True
