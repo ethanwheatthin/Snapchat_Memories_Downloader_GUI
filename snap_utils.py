@@ -3,6 +3,18 @@ import logging
 from datetime import datetime, timezone
 from pathlib import Path
 
+# Optional timezone support
+HAS_TIMEZONE_SUPPORT = False
+_TIMEZONE_IMPORT_ERROR = None
+try:
+    from timezonefinder import TimezoneFinder
+    import pytz
+    HAS_TIMEZONE_SUPPORT = True
+except Exception as e:
+    HAS_TIMEZONE_SUPPORT = False
+    _TIMEZONE_IMPORT_ERROR = e
+    logging.debug("Timezone support libraries not available: %s", e, exc_info=True)
+
 
 def parse_date(date_str):
     """Parse date string from JSON format to timezone-aware datetime object.
@@ -18,14 +30,82 @@ def parse_date(date_str):
         datetime: Timezone-aware datetime object in UTC
     """
     # Parse the date string (ignoring the literal 'UTC' suffix)
-    naive_dt = datetime.strptime(date_str, "%Y-%m-%d %H:%M:%S UTC")
-    
-    # Convert to timezone-aware UTC datetime
+    dt_naive = datetime.strptime(date_str, "%Y-%m-%d %H:%M:%S UTC")
+    # Convert naive datetime to timezone-aware UTC
     # This ensures timestamp() returns correct Unix timestamp regardless of local timezone
-    aware_dt = naive_dt.replace(tzinfo=timezone.utc)
+    return dt_naive.replace(tzinfo=timezone.utc)
+
+
+def convert_to_local_timezone(utc_datetime, latitude, longitude, force_system_tz=False):
+    """
+    Convert UTC datetime to local timezone using GPS coordinates or system timezone.
     
-    logging.debug(f"Parsed date: {date_str} -> {aware_dt} (UTC timestamp: {aware_dt.timestamp()})")
-    return aware_dt
+    Args:
+        utc_datetime: timezone-aware UTC datetime object
+        latitude: GPS latitude coordinate (can be None)
+        longitude: GPS longitude coordinate (can be None)
+        force_system_tz: If True, use system timezone instead of GPS-based lookup
+    
+    Returns:
+        Tuple of (local_datetime, timezone_name, timezone_offset_str)
+        local_datetime: timezone-aware datetime in local timezone
+        timezone_name: IANA timezone name (e.g., 'America/New_York')
+        timezone_offset_str: offset string like '-05:00' or '-04:00'
+    """
+    if not HAS_TIMEZONE_SUPPORT:
+        logging.debug("Timezone support not available, using UTC: %s", _TIMEZONE_IMPORT_ERROR)
+        offset_str = utc_datetime.strftime("%z")
+        offset_str = (offset_str[:-2] + ":" + offset_str[-2:]) if len(offset_str) >= 5 else "+00:00"
+        return utc_datetime, "UTC", offset_str
+    
+    # Try GPS-based timezone lookup if coordinates are available
+    if not force_system_tz and latitude is not None and longitude is not None:
+        try:
+            tf = TimezoneFinder()
+            tz_name = tf.timezone_at(lat=latitude, lng=longitude)
+            if tz_name:
+                local_tz = pytz.timezone(tz_name)
+                local_dt = utc_datetime.astimezone(local_tz)
+                offset_str = local_dt.strftime("%z")
+                offset_str = (offset_str[:-2] + ":" + offset_str[-2:]) if len(offset_str) >= 5 else "+00:00"
+                logging.debug(
+                    "Converted %s UTC to %s (%s) using GPS coordinates (%.4f, %.4f)",
+                    utc_datetime.strftime("%Y-%m-%d %H:%M:%S"),
+                    tz_name,
+                    offset_str,
+                    latitude,
+                    longitude
+                )
+                return local_dt, tz_name, offset_str
+        except Exception as e:
+            logging.warning("GPS timezone lookup failed for (%.4f, %.4f): %s", latitude, longitude, e)
+    
+    # Fall back to system timezone
+    try:
+        local_tz = pytz.timezone('UTC')
+        try:
+            import tzlocal
+            local_tz_str = tzlocal.get_localzone_name()
+            local_tz = pytz.timezone(local_tz_str)
+        except Exception:
+            # Fallback: try to detect from system
+            pass
+        
+        local_dt = utc_datetime.astimezone(local_tz)
+        offset_str = local_dt.strftime("%z")
+        offset_str = (offset_str[:-2] + ":" + offset_str[-2:]) if len(offset_str) >= 5 else "+00:00"
+        tz_name = str(local_tz)
+        logging.debug(
+            "Converted %s UTC to system timezone %s (%s)",
+            utc_datetime.strftime("%Y-%m-%d %H:%M:%S"),
+            tz_name,
+            offset_str
+        )
+        return local_dt, tz_name, offset_str
+    except Exception as e:
+        logging.error("Failed to convert to local timezone: %s", e)
+        offset_str = "+00:00"
+        return utc_datetime, "UTC", offset_str
 
 
 def parse_location(location_str):

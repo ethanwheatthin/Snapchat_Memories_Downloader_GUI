@@ -89,9 +89,9 @@ def decimal_to_dms(decimal):
     return snap_utils.decimal_to_dms(decimal)
 
 
-def set_image_exif_metadata(file_path, date_obj, latitude, longitude):
+def set_image_exif_metadata(file_path, date_obj, latitude, longitude, timezone_offset=None):
     """Set EXIF metadata for image files. Delegates to exif_utils."""
-    return exif_utils.set_image_exif_metadata(file_path, date_obj, latitude, longitude)
+    return exif_utils.set_image_exif_metadata(file_path, date_obj, latitude, longitude, timezone_offset)
 
 def check_ffmpeg():
     """Check if ffmpeg is available on the system. Delegates to video_utils."""
@@ -190,13 +190,13 @@ def convert_with_vlc_subprocess(input_path, output_path):
                 pass
         return video_utils.convert_with_vlc_subprocess(input_path, output_path)
 
-def set_video_metadata(file_path, date_obj, latitude, longitude):
+def set_video_metadata(file_path, date_obj, latitude, longitude, timezone_offset=None):
     """Set metadata for video files. Delegates to video_utils."""
-    return video_utils.set_video_metadata(file_path, date_obj, latitude, longitude)
+    return video_utils.set_video_metadata(file_path, date_obj, latitude, longitude, timezone_offset)
 
-def set_video_metadata_ffmpeg(file_path, date_obj, latitude, longitude):
+def set_video_metadata_ffmpeg(file_path, date_obj, latitude, longitude, timezone_offset=None):
     """Set video metadata using ffmpeg if available. Delegates to video_utils."""
-    return video_utils.set_video_metadata_ffmpeg(file_path, date_obj, latitude, longitude)
+    return video_utils.set_video_metadata_ffmpeg(file_path, date_obj, latitude, longitude, timezone_offset)
 
 def set_file_timestamps(file_path, date_obj):
     """Set file modification and access times. Delegates to snap_utils."""
@@ -862,6 +862,9 @@ class SnapchatDownloaderGUI:
         self.is_downloading = False
         self.stop_download = False
         
+        # Timezone preference variable
+        self.use_gps_tz = tk.BooleanVar(value=True)  # Use GPS for timezone by default
+        
         # Configure style
         self.setup_styles()
         
@@ -870,6 +873,9 @@ class SnapchatDownloaderGUI:
         
         # Center window
         self.center_window()
+        
+        # Setup cleanup handler for orphaned processes
+        self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
     
     def setup_styles(self):
         """Configure ttk styles for a modern look."""
@@ -1105,7 +1111,7 @@ class SnapchatDownloaderGUI:
         resume_header.pack(anchor=tk.W, pady=(15, 8))
         
         # Skip existing files checkbox
-        self.skip_existing = tk.BooleanVar(value=False)
+        self.skip_existing = tk.BooleanVar(value=True)
         skip_check = ttk.Checkbutton(
             input_card,
             text="Skip existing files (resume mode)",
@@ -1142,6 +1148,25 @@ class SnapchatDownloaderGUI:
         )
         reconvert_info.pack(anchor=tk.W, padx=(46, 0), pady=(2, 8))
 
+        # Timezone options section
+        tz_header = ttk.Label(input_card, text="Timezone Handling", style="Header.TLabel")
+        tz_header.pack(anchor=tk.W, pady=(15, 8))
+
+        gps_tz_check = ttk.Checkbutton(
+            input_card,
+            text="Use GPS coordinates to determine local timezone (recommended)",
+            variable=self.use_gps_tz,
+            style="Card.TCheckbutton"
+        )
+        gps_tz_check.pack(anchor=tk.W, padx=(6, 0))
+
+        gps_tz_info = ttk.Label(
+            input_card,
+            text="Uses photo/video GPS location to detect local timezone. Files are named and timestamped with local time.\nWhen disabled or GPS unavailable, uses system timezone as fallback.",
+            style="Info.TLabel"
+        )
+        gps_tz_info.pack(anchor=tk.W, padx=(26, 0), pady=(2, 8))
+
         # Check available conversion tools and display status
         # conversion_status = self.get_conversion_status()
         # conversion_info = ttk.Label(input_card,
@@ -1161,7 +1186,13 @@ class SnapchatDownloaderGUI:
         self.stop_btn = ttk.Button(button_frame, text="⏹ Stop", 
                                    command=self.stop_download_func, 
                                    style="Stop.TButton", state=tk.DISABLED)
-        self.stop_btn.pack(side=tk.LEFT)
+        self.stop_btn.pack(side=tk.LEFT, padx=(0, 10))
+        
+        # DEV TESTING: Test ZIP overlay button
+        # self.test_zip_btn = ttk.Button(button_frame, text="🧪 Test ZIP Overlay", 
+        #                                command=self.test_zip_overlay, 
+        #                                style="Secondary.TButton")
+        # self.test_zip_btn.pack(side=tk.LEFT)
         
         # Progress card
         self.progress_card = ttk.Frame(main_frame, style="Card.TFrame", padding=20)
@@ -1332,6 +1363,92 @@ class SnapchatDownloaderGUI:
         self.stop_btn.config(state=tk.DISABLED, text="⏹ Stopping...")
         self.status_label.config(text="⚠ Stopping download...", foreground="#f39c12")
         self.log("⚠ Stopping download...")
+    
+    def test_zip_overlay(self):
+        """Test ZIP overlay processing with a selected file."""
+        # Open file dialog to select ZIP
+        zip_file = filedialog.askopenfilename(
+            title="Select ZIP file to test overlay processing",
+            filetypes=[("ZIP files", "*.zip"), ("All files", "*.*")],
+            initialdir=os.path.join(os.getcwd(), "test files")
+        )
+        
+        if not zip_file:
+            return
+        
+        if not os.path.exists(zip_file):
+            messagebox.showerror("Error", f"ZIP file not found: {zip_file}")
+            return
+        
+        # Get output directory
+        output_dir = self.output_path.get()
+        if not output_dir:
+            output_dir = "downloads"
+        
+        # Clear log and show processing message
+        self.log_text.delete(1.0, tk.END)
+        self.log("=" * 50)
+        self.log(f"Testing ZIP Overlay Processing")
+        self.log(f"ZIP File: {zip_file}")
+        self.log(f"Output: {output_dir}")
+        self.log("=" * 50)
+        self.log("")
+        
+        # Disable button during processing
+        self.test_zip_btn.config(state=tk.DISABLED, text="🔄 Processing...")
+        self.status_label.config(text="🔄 Processing ZIP overlay...", foreground="#00d2d3")
+        
+        # Run in separate thread to keep GUI responsive
+        thread = threading.Thread(target=self.test_zip_thread, args=(zip_file, output_dir))
+        thread.daemon = True
+        thread.start()
+    
+    def test_zip_thread(self, zip_file, output_dir):
+        """Process ZIP overlay in background thread."""
+        try:
+            output_path = Path(output_dir)
+            output_path.mkdir(exist_ok=True)
+            
+            # Process the ZIP file
+            self.log("Processing ZIP file for overlays...")
+            self.log("(This may take a while for large videos)")
+            self.log("")
+            merged_files = process_zip_overlay(zip_file, output_dir, date_obj=None)
+            
+            if merged_files:
+                self.log("")
+                self.log(f"✓ Successfully processed {len(merged_files)} merged file(s):")
+                for merged_file in merged_files:
+                    self.log(f"  • {os.path.basename(merged_file)}")
+                self.log("")
+                self.log(f"Output location: {output_dir}")
+                self.status_label.config(text="✅ ZIP processing complete", foreground="#27ae60")
+                messagebox.showinfo("Success", 
+                                  f"Successfully processed ZIP overlay!\n\n"
+                                  f"Created {len(merged_files)} merged file(s) in:\n{output_dir}")
+            else:
+                self.log("")
+                self.log("⚠ No overlay pairs found in ZIP file")
+                self.log("  (Looking for files ending with -main and -overlay)")
+                self.status_label.config(text="⚠ No overlays found", foreground="#f39c12")
+                messagebox.showwarning("No Overlays", 
+                                     "No overlay pairs found in ZIP file.\n\n"
+                                     "ZIP should contain files like:\n"
+                                     "• filename-main.mp4\n"
+                                     "• filename-overlay.png")
+        
+        except Exception as e:
+            self.log("")
+            self.log(f"✗ Error processing ZIP: {e}")
+            logging.error(f"ZIP overlay test error: {e}", exc_info=True)
+            self.status_label.config(text="✗ ZIP processing failed", foreground="#e74c3c")
+            messagebox.showerror("Error", f"Failed to process ZIP overlay:\n\n{str(e)}")
+        
+        finally:
+            self.log("")
+            self.log("=" * 50)
+            # Re-enable button
+            self.test_zip_btn.config(state=tk.NORMAL, text="🧪 Test ZIP Overlay")
 
     def cleanup_temp_files(self, output_path):
         """Clean up orphaned temporary files from previous interrupted runs.
@@ -1368,14 +1485,15 @@ class SnapchatDownloaderGUI:
         if cleaned_count > 0:
             self.log(f"🧹 Cleaned up {cleaned_count} temporary file(s) from previous run")
 
-    def should_skip_download(self, item, output_path, idx, date_obj, extension):
+    def should_skip_download(self, item, output_path, idx, date_obj, date_obj_local, extension):
         """Determine if file download should be skipped because it already exists locally.
         
         Args:
             item (dict): JSON item with media metadata
             output_path (Path): Output directory path
             idx (int): Item index for filename generation
-            date_obj (datetime): Parsed date object
+            date_obj (datetime): Parsed UTC date object (for backward compatibility checks)
+            date_obj_local (datetime): Parsed local timezone date object (for new downloads)
             extension (str): File extension (.jpg, .mp4, etc.)
             
         Returns:
@@ -1391,44 +1509,58 @@ class SnapchatDownloaderGUI:
             
             The ambiguity means we cannot definitively know which pattern a given JSON
             item will create, so we check all possibilities and skip if ANY valid file exists.
+            
+            For timezone compatibility, checks both:
+            - Local timezone pattern (new behavior): files named with local time
+            - UTC timezone pattern (legacy): files downloaded before timezone fix
         """
-        date_formatted = date_obj.strftime("%Y%m%d_%H%M%S")
+        # Generate both local and UTC formatted dates for backward compatibility
+        date_formatted_local = date_obj_local.strftime("%Y%m%d_%H%M%S")
+        date_formatted_utc = date_obj.strftime("%Y%m%d_%H%M%S")
+        
+        # We'll check patterns for both local (preferred) and UTC (legacy) timestamps
+        date_patterns = [date_formatted_local]
+        if date_formatted_utc != date_formatted_local:  # Only check UTC if different
+            date_patterns.append(date_formatted_utc)
         
         # Check 1: Normal download filename (YYYYMMDD_HHMMSS_idx.ext)
-        normal_filename = f"{date_formatted}_{idx}{extension}"
-        normal_path = output_path / normal_filename
-        if normal_path.exists():
-            if validate_downloaded_file(str(normal_path)):
-                return True, str(normal_path), "normal download"
-            else:
-                logging.warning(f"Found invalid existing file, will re-download: {normal_path}")
-                return False, None, "invalid file"
-        
-        # Check 2: Merged overlay filename (YYYYMMDD_HHMMSS.ext) - no idx suffix
-        # This pattern is created when ZIP files contain -main/-overlay pairs
-        merged_base = f"{date_formatted}{extension}"
-        merged_path = output_path / merged_base
-        if merged_path.exists():
-            if validate_downloaded_file(str(merged_path)):
-                return True, str(merged_path), "merged overlay"
-            else:
-                logging.warning(f"Found invalid merged file, will re-download: {merged_path}")
-                return False, None, "invalid merged"
-        
-        # Check 3: Collision-resolved merged files (YYYYMMDD_HHMMSS_1.ext, _2.ext, ...)
-        # When multiple overlays have the same timestamp, counter suffixes are added
-        for count in range(1, 11):  # Reasonable upper bound
-            collision_name = f"{date_formatted}_{count}{extension}"
-            collision_path = output_path / collision_name
-            if collision_path.exists():
-                if validate_downloaded_file(str(collision_path)):
-                    return True, str(collision_path), f"collision-resolved merge (_{count})"
+        # Check both local and UTC patterns for backward compatibility
+        for date_formatted in date_patterns:
+            normal_filename = f"{date_formatted}_{idx}{extension}"
+            normal_path = output_path / normal_filename
+            if normal_path.exists():
+                if validate_downloaded_file(str(normal_path)):
+                    return True, str(normal_path), "normal download"
                 else:
-                    logging.warning(f"Found invalid collision file, will re-download: {collision_path}")
-                    return False, None, "invalid collision"
+                    logging.warning(f"Found invalid existing file, will re-download: {normal_path}")
+                    return False, None, "invalid file"
+            
+            # Check 2: Merged overlay filename (YYYYMMDD_HHMMSS.ext) - no idx suffix
+            # This pattern is created when ZIP files contain -main/-overlay pairs
+            merged_base = f"{date_formatted}{extension}"
+            merged_path = output_path / merged_base
+            if merged_path.exists():
+                if validate_downloaded_file(str(merged_path)):
+                    return True, str(merged_path), "merged overlay"
+                else:
+                    logging.warning(f"Found invalid merged file, will re-download: {merged_path}")
+                    return False, None, "invalid merged"
+            
+            # Check 3: Collision-resolved merged files (YYYYMMDD_HHMMSS_1.ext, _2.ext, ...)
+            # When multiple overlays have the same timestamp, counter suffixes are added
+            for count in range(1, 11):  # Reasonable upper bound
+                collision_name = f"{date_formatted}_{count}{extension}"
+                collision_path = output_path / collision_name
+                if collision_path.exists():
+                    if validate_downloaded_file(str(collision_path)):
+                        return True, str(collision_path), f"collision-resolved merge (_{count})"
+                    else:
+                        logging.warning(f"Found invalid collision file, will re-download: {collision_path}")
+                        return False, None, "invalid collision"
         
-        # Check 4: Failed conversions directory
-        failed_path = output_path / "failed_conversions" / normal_filename
+        # Check 4: Failed conversions directory (use local timezone pattern)
+        normal_filename_local = f"{date_formatted_local}_{idx}{extension}"
+        failed_path = output_path / "failed_conversions" / normal_filename_local
         if failed_path.exists():
             # Conservative: skip files that previously failed conversion
             # User can manually delete from failed_conversions/ to retry
@@ -1471,6 +1603,10 @@ class SnapchatDownloaderGUI:
         return False, None
 
     def process_media_item(self, idx, total, item, output_path, max_retries):
+        # Check if stop was requested before processing
+        if self.stop_download:
+            return ([f"[{idx}/{total}] Cancelled"], False, False)
+        
         logs = [f"[{idx}/{total}] Processing..."]
 
         def log_local(message):
@@ -1504,9 +1640,28 @@ class SnapchatDownloaderGUI:
                 log_local(f"  📍 Location: {latitude}, {longitude}")
             else:
                 log_local("  📍 No location data available")
+            
+            # Convert UTC to local timezone using GPS coordinates or system timezone
+            try:
+                # Only force system timezone if GPS option is disabled
+                # (fallback preference is used automatically when GPS lookup fails)
+                force_system_tz = not self.use_gps_tz.get()
+                
+                local_dt, tz_name, tz_offset = snap_utils.convert_to_local_timezone(
+                    date_obj, 
+                    latitude, 
+                    longitude,
+                    force_system_tz=force_system_tz
+                )
+                date_obj_local = local_dt  # Use local time for filenames and metadata
+                log_local(f"  🌍 Timezone: {tz_name} ({tz_offset})")
+            except Exception as e:
+                logging.warning(f"Timezone conversion failed, using UTC: {e}")
+                date_obj_local = date_obj
+                tz_offset = "+00:00"
 
             # Generate filename
-            date_formatted = date_obj.strftime("%Y%m%d_%H%M%S")
+            date_formatted = date_obj_local.strftime("%Y%m%d_%H%M%S")
             extension = get_file_extension(media_type)
             filename = f"{date_formatted}_{idx}{extension}"
             file_path = output_path / filename
@@ -1519,7 +1674,7 @@ class SnapchatDownloaderGUI:
             existing_file_path = None
             if self.skip_existing.get():
                 should_skip, existing_path, skip_reason = self.should_skip_download(
-                    item, output_path, idx, date_obj, extension
+                    item, output_path, idx, date_obj, date_obj_local, extension
                 )
                 if should_skip:
                     skip_download = True
@@ -1541,6 +1696,11 @@ class SnapchatDownloaderGUI:
 
             # Download file (or skip if already exists)
             if not skip_download:
+                # Check stop flag before starting download
+                if self.stop_download:
+                    log_local("  ⚠ Cancelled by user")
+                    return logs, False, False
+                
                 download_success, merged_files = download_media(
                     download_url,
                     str(file_path),
@@ -1579,7 +1739,7 @@ class SnapchatDownloaderGUI:
 
                                 # Try ffmpeg first (sets standard creation_time metadata)
                                 try:
-                                    if set_video_metadata_ffmpeg(str(merged_path), date_obj, latitude, longitude):
+                                    if set_video_metadata_ffmpeg(str(merged_path), date_obj_local, latitude, longitude, tz_offset):
                                         log_local("    ✓ Set video metadata (ffmpeg)")
                                         metadata_set = True
                                 except Exception as ffmpeg_error:
@@ -1588,7 +1748,7 @@ class SnapchatDownloaderGUI:
                                 # Fall back to mutagen if ffmpeg didn't work
                                 if not metadata_set and HAS_MUTAGEN:
                                     try:
-                                        if set_video_metadata(str(merged_path), date_obj, latitude, longitude):
+                                        if set_video_metadata(str(merged_path), date_obj_local, latitude, longitude, tz_offset):
                                             log_local("    ✓ Set video metadata (mutagen)")
                                             metadata_set = True
                                     except Exception as metadata_error:
@@ -1597,17 +1757,17 @@ class SnapchatDownloaderGUI:
                                 if not metadata_set:
                                     log_local("    ℹ Video metadata not set (install ffmpeg or mutagen)")
 
-                                set_file_timestamps(str(merged_path), date_obj)
+                                set_file_timestamps(str(merged_path), date_obj_local)
                                 log_local("    ✓ Set file timestamps")
                             else:
                                 # Set image metadata
                                 if HAS_PIEXIF and ext in ['.jpg', '.jpeg']:
                                     try:
-                                        set_image_exif_metadata(str(merged_path), date_obj, latitude, longitude)
+                                        set_image_exif_metadata(str(merged_path), date_obj_local, latitude, longitude, tz_offset)
                                         log_local("    ✓ Set EXIF metadata")
                                     except Exception as exif_error:
                                         log_local(f"    ⚠ EXIF metadata error: {exif_error}")
-                                set_file_timestamps(str(merged_path), date_obj)
+                                set_file_timestamps(str(merged_path), date_obj_local)
                                 log_local("    ✓ Set file timestamps")
 
                         return logs, True, False
@@ -1616,13 +1776,18 @@ class SnapchatDownloaderGUI:
                     if media_type == "Image" and extension.lower() in ['.jpg', '.jpeg']:
                         if HAS_PIEXIF:
                             try:
-                                set_image_exif_metadata(str(file_path), date_obj, latitude, longitude)
+                                set_image_exif_metadata(str(file_path), date_obj_local, latitude, longitude, tz_offset)
                                 log_local("  ✓ Set EXIF metadata")
                             except Exception as exif_error:
                                 log_local(f"  ⚠ EXIF metadata error: {exif_error}")
                         # Always set file timestamps for images
-                        set_file_timestamps(str(file_path), date_obj)
+                        set_file_timestamps(str(file_path), date_obj_local)
                     elif media_type == "Video":
+                        # Check stop flag before conversion
+                        if self.stop_download:
+                            log_local("  ⚠ Cancelled during conversion")
+                            return logs, False, False
+                        
                         # Convert all videos to H.264 by default
                         log_local("  🔄 Converting to H.264...")
 
@@ -1646,28 +1811,28 @@ class SnapchatDownloaderGUI:
                                         os.remove(str(file_path))
                                         os.rename(result, str(file_path))
                                         # CRITICAL: Set timestamps AFTER file replacement
-                                        set_file_timestamps(str(file_path), date_obj)
+                                        set_file_timestamps(str(file_path), date_obj_local)
                                         log_local("  ✓ Set file timestamps")
                                     except Exception as rename_error:
                                         log_local(f"  ⚠ Could not replace original: {rename_error}")
                                         # If replacement failed but conversion succeeded, still set timestamps on original
-                                        set_file_timestamps(str(file_path), date_obj)
+                                        set_file_timestamps(str(file_path), date_obj_local)
                                 else:
                                     log_local(f"  ⚠ Conversion failed: {result}")
                                     # Don't count as error - file is still downloaded in original format
                                     # Set timestamps on original file
-                                    set_file_timestamps(str(file_path), date_obj)
+                                    set_file_timestamps(str(file_path), date_obj_local)
                             except Exception as conversion_error:
                                 log_local(f"  ⚠ Conversion error: {conversion_error}")
                                 # Ensure timestamps are set even if conversion crashes
-                                set_file_timestamps(str(file_path), date_obj)
+                                set_file_timestamps(str(file_path), date_obj_local)
 
                         # Try to set video metadata - use ffmpeg first for better compatibility, then mutagen
                         metadata_set = False
 
                         # Try ffmpeg first (sets standard creation_time metadata)
                         try:
-                            if set_video_metadata_ffmpeg(str(file_path), date_obj, latitude, longitude):
+                            if set_video_metadata_ffmpeg(str(file_path), date_obj_local, latitude, longitude, tz_offset):
                                 log_local("  ✓ Set video metadata (ffmpeg)")
                                 metadata_set = True
                         except Exception as ffmpeg_error:
@@ -1676,7 +1841,7 @@ class SnapchatDownloaderGUI:
                         # Fall back to mutagen if ffmpeg didn't work
                         if not metadata_set and HAS_MUTAGEN:
                             try:
-                                if set_video_metadata(str(file_path), date_obj, latitude, longitude):
+                                if set_video_metadata(str(file_path), date_obj_local, latitude, longitude, tz_offset):
                                     log_local("  ✓ Set video metadata (mutagen)")
                                     metadata_set = True
                             except Exception as metadata_error:
@@ -1702,7 +1867,7 @@ class SnapchatDownloaderGUI:
                         pass
 
                     try:
-                        set_file_timestamps(str(file_path), date_obj)
+                        set_file_timestamps(str(file_path), date_obj_local)
                         log_local("  ✓ File date set correctly")
                     except Exception as timestamp_error:
                         log_local(f"  ⚠ Failed to set file timestamps: {timestamp_error}")
@@ -1732,7 +1897,7 @@ class SnapchatDownloaderGUI:
                         try:
                             # Check if EXIF update is needed by attempting to set
                             # The function returns True if metadata was written
-                            if set_image_exif_metadata(str(file_path), date_obj, latitude, longitude):
+                            if set_image_exif_metadata(str(file_path), date_obj_local, latitude, longitude, tz_offset):
                                 log_local("  ✓ Updated EXIF metadata")
                                 metadata_updated = True
                             else:
@@ -1746,7 +1911,7 @@ class SnapchatDownloaderGUI:
                     video_metadata_set = False
                     
                     try:
-                        if set_video_metadata_ffmpeg(str(file_path), date_obj, latitude, longitude):
+                        if set_video_metadata_ffmpeg(str(file_path), date_obj_local, latitude, longitude, tz_offset):
                             log_local("  ✓ Updated video metadata (ffmpeg)")
                             video_metadata_set = True
                             metadata_updated = True
@@ -1755,7 +1920,7 @@ class SnapchatDownloaderGUI:
                     
                     if not video_metadata_set and HAS_MUTAGEN:
                         try:
-                            if set_video_metadata(str(file_path), date_obj, latitude, longitude):
+                            if set_video_metadata(str(file_path), date_obj_local, latitude, longitude, tz_offset):
                                 log_local("  ✓ Updated video metadata (mutagen)")
                                 video_metadata_set = True
                                 metadata_updated = True
@@ -1768,10 +1933,10 @@ class SnapchatDownloaderGUI:
                 # Check and set file timestamps
                 try:
                     current_mtime = os.path.getmtime(str(file_path))
-                    expected_mtime = date_obj.timestamp()
+                    expected_mtime = date_obj_local.timestamp()
                     # Only update if timestamp differs by more than 1 second
                     if abs(current_mtime - expected_mtime) > 1:
-                        set_file_timestamps(str(file_path), date_obj)
+                        set_file_timestamps(str(file_path), date_obj_local)
                         log_local("  ✓ Updated file timestamps")
                         metadata_updated = True
                     else:
@@ -1817,6 +1982,12 @@ class SnapchatDownloaderGUI:
                 self.log("🔄 Resume mode enabled - checking for existing files")
                 self.cleanup_temp_files(output_path)
             
+            # Log timezone settings
+            if self.use_gps_tz.get():
+                self.log("🌍 Timezone mode: Using GPS coordinates (falls back to system timezone)")
+            else:
+                self.log("🌍 Timezone mode: Using system/fallback timezone")
+            
             # Process each item
             success_count = 0
             skipped_count = 0
@@ -1831,6 +2002,7 @@ class SnapchatDownloaderGUI:
             futures = {}
             completed_count = 0
             stop_logged = False
+            executor = None
 
             def submit_next():
                 try:
@@ -1849,12 +2021,25 @@ class SnapchatDownloaderGUI:
                 futures[future] = idx
                 return True
 
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            executor = ThreadPoolExecutor(max_workers=max_workers)
+            try:
                 while len(futures) < max_workers and submit_next():
                     pass
 
                 while futures:
-                    done, _ = wait(futures, return_when=FIRST_COMPLETED)
+                    # Use timeout to prevent indefinite blocking
+                    done, _ = wait(futures, return_when=FIRST_COMPLETED, timeout=1.0)
+                    
+                    # Check stop flag even if no tasks completed
+                    if self.stop_download and not done:
+                        if not stop_logged:
+                            self.log("\n⚠ Download stopped by user")
+                            stop_logged = True
+                        # Cancel all remaining futures
+                        for pending_future in list(futures.keys()):
+                            pending_future.cancel()
+                        break
+                    
                     for future in done:
                         idx = futures.pop(future)
                         completed_count += 1
@@ -1911,10 +2096,25 @@ class SnapchatDownloaderGUI:
                             stop_logged = True
 
                     if self.stop_download:
-                        continue
+                        # Cancel all remaining futures
+                        for pending_future in list(futures.keys()):
+                            pending_future.cancel()
+                        break  # Exit the loop immediately
 
                     while len(futures) < max_workers and submit_next():
                         pass
+            finally:
+                # Shutdown executor without waiting for running tasks when stopped
+                if self.stop_download:
+                    # Try to use cancel_futures if available (Python 3.9+)
+                    try:
+                        executor.shutdown(wait=False, cancel_futures=True)
+                    except TypeError:
+                        # Older Python versions don't have cancel_futures parameter
+                        executor.shutdown(wait=False)
+                    self.log("⚡ Forcefully stopped - some tasks cancelled")
+                else:
+                    executor.shutdown(wait=True)
             
             # Final summary
             downloaded_count = success_count - skipped_count
@@ -1958,6 +2158,36 @@ class SnapchatDownloaderGUI:
             self.status_label.config(text="⚠ Download stopped", foreground="#f39c12")
         else:
             self.status_label.config(text="✅ Download complete", foreground="#27ae60")
+    
+    def cleanup_ffmpeg_processes(self):
+        """Kill any orphaned ffmpeg processes."""
+        try:
+            if sys.platform == 'win32':
+                # Use taskkill on Windows to terminate ffmpeg processes
+                subprocess.run(['taskkill', '/F', '/IM', 'ffmpeg.exe'], 
+                             capture_output=True, 
+                             creationflags=CREATE_NO_WINDOW)
+                logging.info("Cleaned up any orphaned ffmpeg processes")
+            else:
+                # On Unix-like systems, use pkill
+                subprocess.run(['pkill', '-9', 'ffmpeg'], capture_output=True)
+                logging.info("Cleaned up any orphaned ffmpeg processes")
+        except Exception as e:
+            # Silently fail if no ffmpeg processes exist or cleanup fails
+            logging.debug(f"ffmpeg cleanup: {e}")
+    
+    def on_closing(self):
+        """Handle application close event."""
+        # Clean up any orphaned ffmpeg processes
+        self.cleanup_ffmpeg_processes()
+        
+        # Stop any ongoing downloads
+        if self.is_downloading:
+            self.stop_download = True
+            logging.info("Download stopped due to application close")
+        
+        # Destroy the window
+        self.root.destroy()
 
 # ==================== Main ====================
 

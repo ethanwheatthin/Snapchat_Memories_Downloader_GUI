@@ -25,8 +25,16 @@ def decimal_to_dms(decimal):
     return ((degrees, 1), (minutes, 1), (int(seconds * 100), 100))
 
 
-def set_image_exif_metadata(file_path, date_obj, latitude, longitude):
-    """Set EXIF metadata for JPEG image files using piexif (if available)."""
+def set_image_exif_metadata(file_path, date_obj, latitude, longitude, timezone_offset=None):
+    """Set EXIF metadata for JPEG image files using piexif (if available).
+    
+    Args:
+        file_path: Path to the JPEG file
+        date_obj: datetime object with timezone info (local time)
+        latitude: GPS latitude (or None)
+        longitude: GPS longitude (or None)
+        timezone_offset: Timezone offset string like '-05:00' (EXIF 2.31 standard)
+    """
     if not HAS_PIEXIF:
         logging.debug("Skipping EXIF metadata: piexif/Pillow not available: %s", _PIEXIF_IMPORT_ERROR)
         return False
@@ -54,6 +62,17 @@ def set_image_exif_metadata(file_path, date_obj, latitude, longitude):
         exif_dict["Exif"][piexif.ExifIFD.DateTimeOriginal] = date_str
         exif_dict["Exif"][piexif.ExifIFD.DateTimeDigitized] = date_str
         exif_dict["0th"][piexif.ImageIFD.DateTime] = date_str
+        
+        # Add timezone offset tags (EXIF 2.31 standard)
+        if timezone_offset:
+            offset_bytes = timezone_offset.encode('ascii')
+            try:
+                exif_dict["Exif"][piexif.ExifIFD.OffsetTimeOriginal] = offset_bytes
+                exif_dict["Exif"][piexif.ExifIFD.OffsetTimeDigitized] = offset_bytes
+                # Note: OffsetTime is only valid in Exif IFD, not ImageIFD, so we skip 0th dictionary
+                logging.debug("Added timezone offset to EXIF: %s", timezone_offset)
+            except Exception as e:
+                logging.debug("Could not add timezone offset tags to EXIF: %s", e)
 
         if latitude is not None and longitude is not None:
             lat_dms = decimal_to_dms(latitude)
