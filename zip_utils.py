@@ -6,6 +6,7 @@ import zipfile
 import tempfile
 import re
 import sys
+import subprocess
 from datetime import datetime
 
 # Windows-specific subprocess flag to prevent command windows from popping up
@@ -89,12 +90,34 @@ def merge_video_overlay(main_video_path, overlay_image_path, output_path):
     
     Returns (True, output_path) on success or (False, error_message).
     """
+    normalized_overlay = None
     try:
         import shutil
         import subprocess
         if shutil.which('ffmpeg') is None:
             logging.warning("ffmpeg not found; cannot merge video overlay")
             return False, "ffmpeg not found"
+
+        # Normalize overlay image to proper PNG format using Pillow
+        # This handles WebP, JPEG, and other formats that may have wrong extensions
+        # or cause issues with ffmpeg's -loop flag
+        if HAS_PIL:
+            try:
+                logging.debug(f"Normalizing overlay image format: {overlay_image_path}")
+                img = PILImage.open(overlay_image_path)
+                # Create a temporary PNG file in the same directory
+                temp_dir = Path(overlay_image_path).parent
+                normalized_overlay = temp_dir / f"{Path(overlay_image_path).stem}_normalized.png"
+                img.save(normalized_overlay, format='PNG')
+                logging.debug(f"Normalized overlay saved to: {normalized_overlay}")
+                # Use the normalized image for ffmpeg
+                overlay_to_use = str(normalized_overlay)
+            except Exception as normalize_error:
+                logging.warning(f"Could not normalize overlay image, using original: {normalize_error}")
+                overlay_to_use = str(overlay_image_path)
+        else:
+            logging.debug("Pillow not available, using original overlay image")
+            overlay_to_use = str(overlay_image_path)
 
         # First, get the duration of the main video to know how long to loop the overlay
         try:
@@ -114,15 +137,19 @@ def merge_video_overlay(main_video_path, overlay_image_path, output_path):
             logging.warning(f"Could not determine video duration, using default loop: {probe_error}")
             video_duration = None
 
-        # Build ffmpeg command with proper overlay looping
-        # Using loop filter ensures the overlay image repeats for entire video duration
-        # shortest=0 ensures output duration matches the main video, not the overlay
+        # Build ffmpeg command with proper overlay scaling and rotation handling
+        # The filter chain:
+        # 1. Rotate both video and overlay by 90° counterclockwise to fix metadata
+        # 2. Scale rotated overlay to match rotated video dimensions exactly
+        # 3. Overlay the scaled image on top of the video
+        # Use -loop 1 on the input to loop the image, and shortest=1 to end with video
         cmd = [
             'ffmpeg', '-y',
-            '-stream_loop', '-1',  # Loop the overlay image indefinitely
-            '-i', str(overlay_image_path),
+            '-loop', '1',  # Loop the image input indefinitely
+            '-i', overlay_to_use,  # Use normalized overlay
             '-i', str(main_video_path),
-            '-filter_complex', '[0:v]loop=loop=-1:size=1:start=0[overlay];[1:v][overlay]overlay=0:0:shortest=1[outv]',
+            '-filter_complex', 
+            '[0:v]transpose=2[overlay_rotated];[1:v]transpose=2[video_rotated];[overlay_rotated][video_rotated]scale2ref[overlay][video];[video][overlay]overlay=0:0:shortest=1[outv]',
             '-map', '[outv]',
             '-map', '1:a?',  # Copy audio from main video if it exists
             '-c:a', 'copy',
@@ -132,16 +159,50 @@ def merge_video_overlay(main_video_path, overlay_image_path, output_path):
 
         logging.info(f"Running ffmpeg to merge video overlay: {' '.join(cmd)}")
         logging.info(f"Input video: {main_video_path}")
-        logging.info(f"Overlay image: {overlay_image_path}")
+        logging.info(f"Overlay image: {overlay_image_path} (normalized: {overlay_to_use})")
         logging.info(f"Output path: {output_path}")
         
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300, creationflags=CREATE_NO_WINDOW)
+        # Run ffmpeg with Popen to capture real-time progress
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            creationflags=CREATE_NO_WINDOW
+        )
+        
+        # Read stderr for progress (ffmpeg writes progress to stderr)
+        stderr_output = []
+        try:
+            while True:
+                line = proc.stderr.readline()
+                if not line and proc.poll() is not None:
+                    break
+                if line:
+                    stderr_output.append(line)
+                    # Log progress lines (they contain 'time=' or 'frame=')
+                    if 'time=' in line or 'frame=' in line:
+                        logging.debug(f"ffmpeg progress: {line.strip()}")
+        except Exception as read_error:
+            logging.warning(f"Error reading ffmpeg output: {read_error}")
+        
+        # Wait for completion with timeout
+        try:
+            proc.wait(timeout=300)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            logging.error("ffmpeg overlay merge timed out after 300 seconds")
+            return False, "ffmpeg timeout"
+        
+        stderr_text = ''.join(stderr_output)
+        proc.returncode = proc.poll()
+        stderr_text = ''.join(stderr_output)
+        proc.returncode = proc.poll()
         
         if proc.returncode != 0:
             logging.error(f"ffmpeg overlay merge failed with return code {proc.returncode}")
-            logging.error(f"ffmpeg stderr: {proc.stderr}")
-            logging.error(f"ffmpeg stdout: {proc.stdout}")
-            return False, proc.stderr
+            logging.error(f"ffmpeg stderr: {stderr_text}")
+            return False, stderr_text
 
         # Verify output exists and has reasonable size
         if os.path.exists(output_path):
@@ -186,6 +247,14 @@ def merge_video_overlay(main_video_path, overlay_image_path, output_path):
     except Exception as e:
         logging.error(f"Error merging video overlay: {e}", exc_info=True)
         return False, str(e)
+    finally:
+        # Clean up normalized overlay file if it was created
+        if normalized_overlay and os.path.exists(normalized_overlay):
+            try:
+                os.remove(normalized_overlay)
+                logging.debug(f"Cleaned up normalized overlay: {normalized_overlay}")
+            except Exception as cleanup_error:
+                logging.debug(f"Could not remove normalized overlay: {cleanup_error}")
 
 
 def process_zip_overlay(zip_path, output_dir, date_obj=None):

@@ -873,6 +873,9 @@ class SnapchatDownloaderGUI:
         
         # Center window
         self.center_window()
+        
+        # Setup cleanup handler for orphaned processes
+        self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
     
     def setup_styles(self):
         """Configure ttk styles for a modern look."""
@@ -1108,7 +1111,7 @@ class SnapchatDownloaderGUI:
         resume_header.pack(anchor=tk.W, pady=(15, 8))
         
         # Skip existing files checkbox
-        self.skip_existing = tk.BooleanVar(value=False)
+        self.skip_existing = tk.BooleanVar(value=True)
         skip_check = ttk.Checkbutton(
             input_card,
             text="Skip existing files (resume mode)",
@@ -1183,7 +1186,13 @@ class SnapchatDownloaderGUI:
         self.stop_btn = ttk.Button(button_frame, text="⏹ Stop", 
                                    command=self.stop_download_func, 
                                    style="Stop.TButton", state=tk.DISABLED)
-        self.stop_btn.pack(side=tk.LEFT)
+        self.stop_btn.pack(side=tk.LEFT, padx=(0, 10))
+        
+        # DEV TESTING: Test ZIP overlay button
+        # self.test_zip_btn = ttk.Button(button_frame, text="🧪 Test ZIP Overlay", 
+        #                                command=self.test_zip_overlay, 
+        #                                style="Secondary.TButton")
+        # self.test_zip_btn.pack(side=tk.LEFT)
         
         # Progress card
         self.progress_card = ttk.Frame(main_frame, style="Card.TFrame", padding=20)
@@ -1354,6 +1363,92 @@ class SnapchatDownloaderGUI:
         self.stop_btn.config(state=tk.DISABLED, text="⏹ Stopping...")
         self.status_label.config(text="⚠ Stopping download...", foreground="#f39c12")
         self.log("⚠ Stopping download...")
+    
+    def test_zip_overlay(self):
+        """Test ZIP overlay processing with a selected file."""
+        # Open file dialog to select ZIP
+        zip_file = filedialog.askopenfilename(
+            title="Select ZIP file to test overlay processing",
+            filetypes=[("ZIP files", "*.zip"), ("All files", "*.*")],
+            initialdir=os.path.join(os.getcwd(), "test files")
+        )
+        
+        if not zip_file:
+            return
+        
+        if not os.path.exists(zip_file):
+            messagebox.showerror("Error", f"ZIP file not found: {zip_file}")
+            return
+        
+        # Get output directory
+        output_dir = self.output_path.get()
+        if not output_dir:
+            output_dir = "downloads"
+        
+        # Clear log and show processing message
+        self.log_text.delete(1.0, tk.END)
+        self.log("=" * 50)
+        self.log(f"Testing ZIP Overlay Processing")
+        self.log(f"ZIP File: {zip_file}")
+        self.log(f"Output: {output_dir}")
+        self.log("=" * 50)
+        self.log("")
+        
+        # Disable button during processing
+        self.test_zip_btn.config(state=tk.DISABLED, text="🔄 Processing...")
+        self.status_label.config(text="🔄 Processing ZIP overlay...", foreground="#00d2d3")
+        
+        # Run in separate thread to keep GUI responsive
+        thread = threading.Thread(target=self.test_zip_thread, args=(zip_file, output_dir))
+        thread.daemon = True
+        thread.start()
+    
+    def test_zip_thread(self, zip_file, output_dir):
+        """Process ZIP overlay in background thread."""
+        try:
+            output_path = Path(output_dir)
+            output_path.mkdir(exist_ok=True)
+            
+            # Process the ZIP file
+            self.log("Processing ZIP file for overlays...")
+            self.log("(This may take a while for large videos)")
+            self.log("")
+            merged_files = process_zip_overlay(zip_file, output_dir, date_obj=None)
+            
+            if merged_files:
+                self.log("")
+                self.log(f"✓ Successfully processed {len(merged_files)} merged file(s):")
+                for merged_file in merged_files:
+                    self.log(f"  • {os.path.basename(merged_file)}")
+                self.log("")
+                self.log(f"Output location: {output_dir}")
+                self.status_label.config(text="✅ ZIP processing complete", foreground="#27ae60")
+                messagebox.showinfo("Success", 
+                                  f"Successfully processed ZIP overlay!\n\n"
+                                  f"Created {len(merged_files)} merged file(s) in:\n{output_dir}")
+            else:
+                self.log("")
+                self.log("⚠ No overlay pairs found in ZIP file")
+                self.log("  (Looking for files ending with -main and -overlay)")
+                self.status_label.config(text="⚠ No overlays found", foreground="#f39c12")
+                messagebox.showwarning("No Overlays", 
+                                     "No overlay pairs found in ZIP file.\n\n"
+                                     "ZIP should contain files like:\n"
+                                     "• filename-main.mp4\n"
+                                     "• filename-overlay.png")
+        
+        except Exception as e:
+            self.log("")
+            self.log(f"✗ Error processing ZIP: {e}")
+            logging.error(f"ZIP overlay test error: {e}", exc_info=True)
+            self.status_label.config(text="✗ ZIP processing failed", foreground="#e74c3c")
+            messagebox.showerror("Error", f"Failed to process ZIP overlay:\n\n{str(e)}")
+        
+        finally:
+            self.log("")
+            self.log("=" * 50)
+            # Re-enable button
+            self.test_zip_btn.config(state=tk.NORMAL, text="🧪 Test ZIP Overlay")
 
     def cleanup_temp_files(self, output_path):
         """Clean up orphaned temporary files from previous interrupted runs.
@@ -2063,6 +2158,36 @@ class SnapchatDownloaderGUI:
             self.status_label.config(text="⚠ Download stopped", foreground="#f39c12")
         else:
             self.status_label.config(text="✅ Download complete", foreground="#27ae60")
+    
+    def cleanup_ffmpeg_processes(self):
+        """Kill any orphaned ffmpeg processes."""
+        try:
+            if sys.platform == 'win32':
+                # Use taskkill on Windows to terminate ffmpeg processes
+                subprocess.run(['taskkill', '/F', '/IM', 'ffmpeg.exe'], 
+                             capture_output=True, 
+                             creationflags=CREATE_NO_WINDOW)
+                logging.info("Cleaned up any orphaned ffmpeg processes")
+            else:
+                # On Unix-like systems, use pkill
+                subprocess.run(['pkill', '-9', 'ffmpeg'], capture_output=True)
+                logging.info("Cleaned up any orphaned ffmpeg processes")
+        except Exception as e:
+            # Silently fail if no ffmpeg processes exist or cleanup fails
+            logging.debug(f"ffmpeg cleanup: {e}")
+    
+    def on_closing(self):
+        """Handle application close event."""
+        # Clean up any orphaned ffmpeg processes
+        self.cleanup_ffmpeg_processes()
+        
+        # Stop any ongoing downloads
+        if self.is_downloading:
+            self.stop_download = True
+            logging.info("Download stopped due to application close")
+        
+        # Destroy the window
+        self.root.destroy()
 
 # ==================== Main ====================
 
