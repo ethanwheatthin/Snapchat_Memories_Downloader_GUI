@@ -1111,7 +1111,7 @@ class SnapchatDownloaderGUI:
         resume_header.pack(anchor=tk.W, pady=(15, 8))
         
         # Skip existing files checkbox
-        self.skip_existing = tk.BooleanVar(value=True)
+        self.skip_existing = tk.BooleanVar(value=False)
         skip_check = ttk.Checkbutton(
             input_card,
             text="Skip existing files (resume mode)",
