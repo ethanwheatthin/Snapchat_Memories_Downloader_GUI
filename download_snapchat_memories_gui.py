@@ -1508,6 +1508,10 @@ class SnapchatDownloaderGUI:
         return False, None
 
     def process_media_item(self, idx, total, item, output_path, max_retries):
+        # Check if stop was requested before processing
+        if self.stop_download:
+            return ([f"[{idx}/{total}] Cancelled"], False, False)
+        
         logs = [f"[{idx}/{total}] Processing..."]
 
         def log_local(message):
@@ -1597,6 +1601,11 @@ class SnapchatDownloaderGUI:
 
             # Download file (or skip if already exists)
             if not skip_download:
+                # Check stop flag before starting download
+                if self.stop_download:
+                    log_local("  ⚠ Cancelled by user")
+                    return logs, False, False
+                
                 download_success, merged_files = download_media(
                     download_url,
                     str(file_path),
@@ -1679,6 +1688,11 @@ class SnapchatDownloaderGUI:
                         # Always set file timestamps for images
                         set_file_timestamps(str(file_path), date_obj_local)
                     elif media_type == "Video":
+                        # Check stop flag before conversion
+                        if self.stop_download:
+                            log_local("  ⚠ Cancelled during conversion")
+                            return logs, False, False
+                        
                         # Convert all videos to H.264 by default
                         log_local("  🔄 Converting to H.264...")
 
@@ -1893,6 +1907,7 @@ class SnapchatDownloaderGUI:
             futures = {}
             completed_count = 0
             stop_logged = False
+            executor = None
 
             def submit_next():
                 try:
@@ -1911,12 +1926,25 @@ class SnapchatDownloaderGUI:
                 futures[future] = idx
                 return True
 
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            executor = ThreadPoolExecutor(max_workers=max_workers)
+            try:
                 while len(futures) < max_workers and submit_next():
                     pass
 
                 while futures:
-                    done, _ = wait(futures, return_when=FIRST_COMPLETED)
+                    # Use timeout to prevent indefinite blocking
+                    done, _ = wait(futures, return_when=FIRST_COMPLETED, timeout=1.0)
+                    
+                    # Check stop flag even if no tasks completed
+                    if self.stop_download and not done:
+                        if not stop_logged:
+                            self.log("\n⚠ Download stopped by user")
+                            stop_logged = True
+                        # Cancel all remaining futures
+                        for pending_future in list(futures.keys()):
+                            pending_future.cancel()
+                        break
+                    
                     for future in done:
                         idx = futures.pop(future)
                         completed_count += 1
@@ -1973,10 +2001,25 @@ class SnapchatDownloaderGUI:
                             stop_logged = True
 
                     if self.stop_download:
-                        continue
+                        # Cancel all remaining futures
+                        for pending_future in list(futures.keys()):
+                            pending_future.cancel()
+                        break  # Exit the loop immediately
 
                     while len(futures) < max_workers and submit_next():
                         pass
+            finally:
+                # Shutdown executor without waiting for running tasks when stopped
+                if self.stop_download:
+                    # Try to use cancel_futures if available (Python 3.9+)
+                    try:
+                        executor.shutdown(wait=False, cancel_futures=True)
+                    except TypeError:
+                        # Older Python versions don't have cancel_futures parameter
+                        executor.shutdown(wait=False)
+                    self.log("⚡ Forcefully stopped - some tasks cancelled")
+                else:
+                    executor.shutdown(wait=True)
             
             # Final summary
             downloaded_count = success_count - skipped_count
