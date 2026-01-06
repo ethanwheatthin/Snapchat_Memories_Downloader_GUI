@@ -4,6 +4,7 @@ A user-friendly Windows desktop application to download and preserve your Snapch
 
 ![Application Interface](images/application_screen.png)
 
+
 ## 🚀 Quick Start
 
 **Download the official release executable** — The easiest way to use this tool:
