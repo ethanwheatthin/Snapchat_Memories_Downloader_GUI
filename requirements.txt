@@ -1,9 +1,15 @@
+# Core dependencies
 requests
 pillow
 piexif
 mutagen
 av
 python-vlc
+
+# Timezone support
 timezonefinder>=6.0.0
 pytz>=2021.3
 tzlocal>=4.0.0
+
+# Development/Testing (optional - only needed to run tests)
+pytest>=7.0.0

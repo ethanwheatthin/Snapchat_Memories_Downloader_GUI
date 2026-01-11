@@ -115,80 +115,7 @@ def convert_with_vlc_python(input_path, output_path):
 
 def convert_with_vlc_subprocess(input_path, output_path):
     """Convert video using VLC command-line interface via subprocess."""
-    vlc_path = find_vlc_executable()
-    if not vlc_path:
-        logging.error("VLC executable not found on system")
-        return False, "VLC not installed"
-    
-    try:
-        logging.info(f"Converting with VLC (subprocess): {input_path}")
-        
-        # VLC command-line conversion
-        # This matches the VLC GUI profile: Video - H.264 + MP3 (MP4)
-        cmd = [
-            vlc_path,
-            "-I", "dummy",  # No interface
-            "--no-repeat",
-            "--no-loop",
-            input_path,
-            "--sout", (
-                f"#transcode{{"
-                f"vcodec=h264,"
-                f"venc=x264{{"
-                    f"preset=medium,"
-                    f"profile=main"
-                f"}},"
-                f"acodec=mp3,"
-                f"ab=192,"
-                f"channels=2,"
-                f"samplerate=44100"
-                f"}}:"
-                f"standard{{"
-                    f"access=file,"
-                    f"mux=mp4,"
-                    f"dst={output_path}"
-                f"}}"
-            ),
-            "vlc://quit"
-        ]
-        
-        logging.debug(f"VLC command: {' '.join(cmd)}")
-        
-        # Run VLC conversion
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=300,  # 5 minute timeout
-            creationflags=CREATE_NO_WINDOW
-        )
-        
-        # Check if output file was created
-        if os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
-            logging.info(f"VLC subprocess conversion successful: {output_path}")
-            return True, output_path
-        else:
-            logging.error(f"VLC subprocess conversion failed - output file not created or too small")
-            if os.path.exists(output_path):
-                os.remove(output_path)
-            return False, "VLC subprocess conversion failed"
-            
-    except subprocess.TimeoutExpired:
-        logging.error("VLC subprocess conversion timed out")
-        if os.path.exists(output_path):
-            try:
-                os.remove(output_path)
-            except:
-                pass
-        return video_utils.convert_with_vlc_subprocess(input_path, output_path)
-    except Exception as e:
-        logging.error(f"VLC subprocess conversion error: {e}", exc_info=True)
-        if os.path.exists(output_path):
-            try:
-                os.remove(output_path)
-            except:
-                pass
-        return video_utils.convert_with_vlc_subprocess(input_path, output_path)
+    return video_utils.convert_with_vlc_subprocess(input_path, output_path)
 
 def set_video_metadata(file_path, date_obj, latitude, longitude, timezone_offset=None):
     """Set metadata for video files. Delegates to video_utils."""
@@ -223,7 +150,24 @@ def merge_video_overlay(main_video_path, overlay_image_path, output_path):
     """Overlay an image on top of a video using ffmpeg. Delegates to zip_utils."""
     return zip_utils.merge_video_overlay(main_video_path, overlay_image_path, output_path)
 
-def merge_images(main_img_path, overlay_img_path, output_path):
+def process_zip_overlay(zip_path, output_dir, date_obj=None):
+    """Process ZIP overlay files. Delegates to zip_utils."""
+    return zip_utils.process_zip_overlay(zip_path, output_dir, date_obj)
+
+def download_media(url, output_path, max_retries=3, progress_callback=None, date_obj=None):
+    """Download media with retry mechanism. Delegates to downloader."""
+    return downloader.download_media(url, output_path, max_retries, progress_callback, date_obj)
+
+def validate_downloaded_file(file_path):
+    """Validate downloaded file. Delegates to snap_utils."""
+    return snap_utils.validate_downloaded_file(file_path)
+
+def get_file_extension(media_type):
+    """Get file extension for media type. Delegates to snap_utils."""
+    return snap_utils.get_file_extension(media_type)
+
+
+# ==================== GUI Application ====================
     """Merge overlay image on top of main image and save to output_path.
 
     - Resizes overlay to match main if sizes differ.

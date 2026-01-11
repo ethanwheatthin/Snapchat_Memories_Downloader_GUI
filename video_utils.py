@@ -33,6 +33,28 @@ except Exception:
     HAS_VLC = False
 
 
+def sanitize_path(path):
+    """Sanitize file path by stripping trailing invalid characters and normalizing.
+    
+    Fixes issues where paths may have trailing braces, spaces, or other invalid chars.
+    
+    Args:
+        path: Input path (str or Path)
+        
+    Returns:
+        Path object with sanitized absolute path
+    """
+    if path is None:
+        return None
+    
+    path_str = str(path).strip()
+    # Strip common trailing invalid characters
+    path_str = path_str.rstrip('{}\t ')
+    
+    # Convert to Path and resolve to absolute
+    return Path(path_str).resolve()
+
+
 def check_ffmpeg():
     import shutil
     return shutil.which('ffmpeg') is not None
@@ -56,10 +78,109 @@ def find_vlc_executable():
     return None
 
 
+def validate_video_file(file_path, min_duration=0.1, min_size=1000):
+    """Validate video file using ffprobe or fallback to size check.
+    
+    Args:
+        file_path: Path to video file
+        min_duration: Minimum duration in seconds (default 0.1)
+        min_size: Minimum file size in bytes (default 1000)
+        
+    Returns:
+        Tuple of (is_valid: bool, info: dict)
+        info contains: duration, has_video, has_audio, codec, error
+    """
+    file_path = sanitize_path(file_path)
+    info = {
+        'duration': None,
+        'has_video': False,
+        'has_audio': False,
+        'codec': None,
+        'error': None
+    }
+    
+    # Basic checks
+    if not file_path.exists():
+        info['error'] = 'File does not exist'
+        return False, info
+    
+    file_size = file_path.stat().st_size
+    if file_size < min_size:
+        info['error'] = f'File too small: {file_size} bytes'
+        return False, info
+    
+    # Try ffprobe validation if available
+    if check_ffmpeg():
+        try:
+            # Get format info (duration)
+            cmd_format = [
+                'ffprobe', '-v', 'error',
+                '-show_entries', 'format=duration',
+                '-of', 'default=noprint_wrappers=1:nokey=1',
+                str(file_path)
+            ]
+            result = subprocess.run(cmd_format, capture_output=True, text=True, timeout=10, creationflags=CREATE_NO_WINDOW)
+            if result.returncode == 0 and result.stdout.strip():
+                try:
+                    info['duration'] = float(result.stdout.strip())
+                except ValueError:
+                    pass
+            
+            # Get stream info
+            cmd_streams = [
+                'ffprobe', '-v', 'error',
+                '-show_entries', 'stream=codec_type,codec_name',
+                '-of', 'json',
+                str(file_path)
+            ]
+            result = subprocess.run(cmd_streams, capture_output=True, text=True, timeout=10, creationflags=CREATE_NO_WINDOW)
+            if result.returncode == 0:
+                import json
+                data = json.loads(result.stdout)
+                for stream in data.get('streams', []):
+                    codec_type = stream.get('codec_type')
+                    if codec_type == 'video':
+                        info['has_video'] = True
+                        info['codec'] = stream.get('codec_name')
+                    elif codec_type == 'audio':
+                        info['has_audio'] = True
+            
+            # Validation logic
+            if not info['has_video']:
+                info['error'] = 'No video stream found'
+                return False, info
+            
+            if info['duration'] is not None and info['duration'] < min_duration:
+                info['error'] = f"Duration too short: {info['duration']}s"
+                return False, info
+            
+            logging.debug(f"Video validation passed: {file_path} - duration={info['duration']}s, codec={info['codec']}")
+            return True, info
+            
+        except subprocess.TimeoutExpired:
+            logging.warning(f"ffprobe validation timed out for {file_path}")
+        except Exception as e:
+            logging.debug(f"ffprobe validation error: {e}")
+    
+    # Fallback: if ffprobe not available or failed, just check size
+    logging.debug(f"Video validation (size-only): {file_path} - {file_size} bytes")
+    return True, info
+
+
 def convert_with_vlc(input_path, output_path=None):
+    """Convert video using VLC (Python bindings or subprocess).
+    
+    Returns:
+        Tuple of (success: bool, result: Path or error_message: str)
+    """
+    input_path = sanitize_path(input_path)
+    
     if output_path is None:
-        base, ext = os.path.splitext(input_path)
-        output_path = f"{base}_converted{ext}"
+        base = input_path.stem
+        ext = input_path.suffix
+        output_path = input_path.parent / f"{base}_converted{ext}"
+    else:
+        output_path = sanitize_path(output_path)
 
     if HAS_VLC:
         try:
@@ -71,16 +192,26 @@ def convert_with_vlc(input_path, output_path=None):
 
 
 def convert_with_vlc_python(input_path, output_path):
+    """Convert video using VLC Python bindings.
+    
+    Returns:
+        Tuple of (success: bool, result: Path or error_message: str)
+    """
+    input_path = sanitize_path(input_path)
+    output_path = sanitize_path(output_path)
+    
     try:
         logging.info(f"Converting with VLC (Python bindings): {input_path}")
         instance = vlc.Instance('--no-xlib')
         player = instance.media_player_new()
-        media = instance.media_new(input_path)
+        media = instance.media_new(str(input_path))
 
+        # Use forward slashes for VLC compatibility
+        output_str = str(output_path).replace('\\', '/')
         transcode_options = (
             f"#transcode{{"
             f"vcodec=h264,venc=x264{{preset=medium,profile=main}},acodec=mp3,ab=192,channels=2,samplerate=44100}}:"
-            f"standard{{access=file,mux=mp4,dst={output_path}}}"
+            f"standard{{access=file,mux=mp4,dst={output_str}}}"
         )
         media.add_option(f":sout={transcode_options}")
         media.add_option(":sout-keep")
@@ -99,55 +230,94 @@ def convert_with_vlc_python(input_path, output_path):
             time.sleep(0.5)
         else:
             player.stop()
-            if os.path.exists(output_path):
-                os.remove(output_path)
+            if output_path.exists():
+                output_path.unlink()
             return False, "VLC conversion timed out"
 
         player.stop()
         player.release()
         media.release()
 
-        if os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
+        if output_path.exists() and output_path.stat().st_size > 1000:
+            logging.info(f"VLC Python conversion successful: {output_path}")
             return True, output_path
         else:
-            if os.path.exists(output_path):
-                os.remove(output_path)
+            if output_path.exists():
+                output_path.unlink()
             return False, "VLC conversion failed"
 
     except Exception as e:
         logging.error(f"VLC Python conversion error: {e}", exc_info=True)
-        if os.path.exists(output_path):
+        if output_path.exists():
             try:
-                os.remove(output_path)
+                output_path.unlink()
             except Exception:
                 pass
         raise
 
 
 def convert_with_vlc_subprocess(input_path, output_path):
+    """Convert video using VLC subprocess with proper path sanitization.
+    
+    Returns:
+        Tuple of (success: bool, result: Path or error_message: str)
+    """
     vlc_path = find_vlc_executable()
     if not vlc_path:
         logging.error("VLC executable not found on system")
         return False, "VLC not installed"
-
+    
+    # Sanitize paths to prevent trailing brace issues
+    input_path = sanitize_path(input_path)
+    output_path = sanitize_path(output_path)
+    
+    # CRITICAL: Use quotes around path in --sout to prevent issues with special chars
+    # Also escape the braces in the transcode options properly
+    output_str = str(output_path).replace('\\', '/')  # VLC prefers forward slashes
+    
     cmd = [
         vlc_path, "-I", "dummy", "--no-repeat", "--no-loop",
-        input_path,
+        str(input_path),
         "--sout",
         (f"#transcode{{vcodec=h264,venc=x264{{preset=medium,profile=main}},acodec=mp3,ab=192,channels=2,samplerate=44100}}:"
-         f"standard{{access=file,mux=mp4,dst={output_path}}}"),
+         f"standard{{access=file,mux=mp4,dst={output_str}}}"),
         "vlc://quit"
     ]
 
     logging.debug(f"VLC command: {' '.join(cmd)}")
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=300, creationflags=CREATE_NO_WINDOW)
-
-    if os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
-        return True, output_path
-    else:
-        if os.path.exists(output_path):
-            os.remove(output_path)
-        return False, "VLC subprocess conversion failed"
+    logging.info(f"Converting with VLC subprocess: {input_path} -> {output_path}")
+    
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300, creationflags=CREATE_NO_WINDOW)
+        
+        # Log stderr for debugging
+        if result.stderr:
+            logging.debug(f"VLC stderr: {result.stderr[:500]}")
+        
+        if output_path.exists() and output_path.stat().st_size > 1000:
+            logging.info(f"VLC subprocess conversion successful: {output_path}")
+            return True, output_path
+        else:
+            if output_path.exists():
+                output_path.unlink()
+            logging.error(f"VLC subprocess conversion failed - output not created or too small")
+            return False, "VLC subprocess conversion failed"
+    except subprocess.TimeoutExpired:
+        logging.error("VLC subprocess conversion timed out")
+        if output_path.exists():
+            try:
+                output_path.unlink()
+            except Exception:
+                pass
+        return False, "VLC subprocess timeout"
+    except Exception as e:
+        logging.error(f"VLC subprocess conversion error: {e}", exc_info=True)
+        if output_path.exists():
+            try:
+                output_path.unlink()
+            except Exception:
+                pass
+        return False, str(e)
 
 
 def set_video_metadata(file_path, date_obj, latitude, longitude, timezone_offset=None):
@@ -457,26 +627,40 @@ def enforce_portrait_video(file_path, timeout=300):
 
 
 def convert_hevc_to_h264(input_path, output_path=None, max_attempts=3, failed_dir_path="downloads/failed_conversions"):
+    """Convert video to H.264 using atomic temp file approach with validation.
+    
+    Returns:
+        Tuple of (success: bool, result: Path or error_message: str)
+    """
+    input_path = sanitize_path(input_path)
+    
     if not HAS_PYAV:
         logging.warning("PyAV not installed. Attempting VLC fallback...")
         return convert_with_vlc(input_path, output_path)
 
+    # Use temp file in same directory for atomic replace
     if output_path is None:
-        base, ext = os.path.splitext(input_path)
-        output_path = f"{base}_temp{ext}"
-
+        output_path = input_path.parent / f"{input_path.stem}_converted{input_path.suffix}"
+    else:
+        output_path = sanitize_path(output_path)
+    
+    # Always write to .temp file first
+    temp_output = output_path.parent / f"{output_path.stem}.temp{output_path.suffix}"
+    
     attempt = 0
     while attempt < max_attempts:
         attempt += 1
         input_container = None
         output_container = None
+        conversion_id = f"{input_path.stem}_{int(time.time())}_{attempt}"
+        
         try:
-            logging.info(f"Attempt {attempt}: Opening input video: {input_path}")
-            input_container = av.open(input_path)
+            logging.info(f"[{conversion_id}] Attempt {attempt}: Opening input video: {input_path}")
+            input_container = av.open(str(input_path))
             input_video_stream = input_container.streams.video[0]
 
-            logging.info(f"Attempt {attempt}: Creating output container: {output_path}")
-            output_container = av.open(output_path, 'w')
+            logging.info(f"[{conversion_id}] Creating temp output: {temp_output}")
+            output_container = av.open(str(temp_output), 'w')
 
             output_video_stream = output_container.add_stream('h264', rate=input_video_stream.average_rate)
             output_video_stream.width = input_video_stream.width
@@ -492,7 +676,7 @@ def convert_hevc_to_h264(input_path, output_path=None, max_attempts=3, failed_di
                 if hasattr(audio_stream, 'layout') and audio_stream.layout:
                     output_audio_stream.layout = audio_stream.layout
 
-            logging.info(f"Attempt {attempt}: Processing frames...")
+            logging.info(f"[{conversion_id}] Processing frames...")
             for packet in input_container.demux():
                 if packet.stream.type == 'video':
                     for frame in packet.decode():
@@ -503,14 +687,14 @@ def convert_hevc_to_h264(input_path, output_path=None, max_attempts=3, failed_di
                         for out_packet in output_audio_stream.encode(frame):
                             output_container.mux(out_packet)
 
-            logging.info(f"Attempt {attempt}: Flushing streams...")
+            logging.info(f"[{conversion_id}] Flushing streams...")
             for packet in output_video_stream.encode():
                 output_container.mux(packet)
             if output_audio_stream:
                 for packet in output_audio_stream.encode():
                     output_container.mux(packet)
 
-            logging.info(f"Attempt {attempt}: Closing containers...")
+            logging.info(f"[{conversion_id}] Closing containers...")
             if input_container:
                 input_container.close()
                 input_container = None
@@ -518,11 +702,31 @@ def convert_hevc_to_h264(input_path, output_path=None, max_attempts=3, failed_di
                 output_container.close()
                 output_container = None
 
-            logging.info(f"Conversion to H.264 successful on attempt {attempt}: {output_path}")
-            return True, output_path
+            # CRITICAL: Validate the temp file before replacing original
+            logging.info(f"[{conversion_id}] Validating converted file...")
+            is_valid, validation_info = validate_video_file(temp_output)
+            
+            if not is_valid:
+                logging.warning(f"[{conversion_id}] Validation failed: {validation_info.get('error')}")
+                if temp_output.exists():
+                    temp_output.unlink()
+                continue  # Retry
+            
+            # Validation passed - atomically replace
+            logging.info(f"[{conversion_id}] Validation passed, performing atomic replace...")
+            try:
+                # Use os.replace for atomic operation (Windows: overwrites if exists)
+                os.replace(str(temp_output), str(output_path))
+                logging.info(f"[{conversion_id}] Conversion successful: {output_path}")
+                return True, output_path
+            except Exception as replace_error:
+                logging.error(f"[{conversion_id}] Failed to replace file: {replace_error}")
+                if temp_output.exists():
+                    temp_output.unlink()
+                return False, f"Failed to replace file: {replace_error}"
 
         except Exception as e:
-            logging.error(f"Attempt {attempt}: Error during conversion: {e}", exc_info=True)
+            logging.error(f"[{conversion_id}] Error during conversion: {e}", exc_info=True)
             try:
                 if input_container:
                     input_container.close()
@@ -533,46 +737,65 @@ def convert_hevc_to_h264(input_path, output_path=None, max_attempts=3, failed_di
                     output_container.close()
             except Exception:
                 pass
-            time.sleep(0.5)
-            if os.path.exists(output_path):
+            
+            if temp_output.exists():
                 try:
-                    os.remove(output_path)
-                    logging.info(f"Attempt {attempt}: Removed partial output: {output_path}")
+                    temp_output.unlink()
+                    logging.info(f"[{conversion_id}] Removed invalid temp file")
                 except Exception as cleanup_error:
-                    logging.error(f"Attempt {attempt}: Failed to remove partial output {output_path}: {cleanup_error}", exc_info=True)
+                    logging.error(f"[{conversion_id}] Failed to remove temp file: {cleanup_error}")
+            
+            time.sleep(0.5)
 
-        logging.warning(f"Attempt {attempt} failed. Retrying...")
-
-    logging.info("All PyAV attempts failed. Trying VLC fallback...")
+    # All PyAV attempts exhausted - try VLC fallback
+    logging.info(f"All PyAV attempts failed for {input_path}. Trying VLC fallback...")
     time.sleep(1)
-    vlc_success, vlc_result = convert_with_vlc(input_path, output_path)
+    
+    # VLC fallback also uses temp file
+    vlc_temp = output_path.parent / f"{output_path.stem}.vlc_temp{output_path.suffix}"
+    vlc_success, vlc_result = convert_with_vlc(input_path, vlc_temp)
+    
     if vlc_success:
-        logging.info(f"VLC fallback conversion successful: {vlc_result}")
-        return True, vlc_result
+        # Validate VLC output
+        is_valid, validation_info = validate_video_file(vlc_temp)
+        if is_valid:
+            try:
+                os.replace(str(vlc_temp), str(output_path))
+                logging.info(f"VLC fallback conversion successful: {output_path}")
+                return True, output_path
+            except Exception as e:
+                logging.error(f"Failed to replace after VLC conversion: {e}")
+                if vlc_temp.exists():
+                    vlc_temp.unlink()
+        else:
+            logging.warning(f"VLC conversion validation failed: {validation_info.get('error')}")
+            if vlc_temp.exists():
+                vlc_temp.unlink()
 
-    # Move to failed_conversions
+    # Complete failure - move to failed_conversions with logs
     failed_dir = Path(failed_dir_path)
     failed_dir.mkdir(parents=True, exist_ok=True)
-    failed_path = failed_dir / Path(input_path).name
+    failed_path = failed_dir / input_path.name
 
-    error_log_path = failed_dir / f"{Path(input_path).stem}_error.txt"
+    error_log_path = failed_dir / f"{input_path.stem}_error_{int(time.time())}.log"
     try:
-        with open(error_log_path, 'w') as f:
-            f.write(f"Failed conversion: {input_path}\n")
-            f.write(f"PyAV result: Failed after {max_attempts} attempts\n")
-            f.write(f"VLC result: {vlc_result}\n")
-            f.write(f"Timestamp: {datetime.now().isoformat()}\n")
+        with open(error_log_path, 'w', encoding='utf-8') as f:
+            f.write(f"Failed conversion: {input_path}\\n")
+            f.write(f"PyAV: Failed after {max_attempts} attempts\\n")
+            f.write(f"VLC: {vlc_result if not vlc_success else 'Failed validation'}\\n")
+            f.write(f"Timestamp: {datetime.now().isoformat()}\\n")
+            if isinstance(vlc_result, str):
+                f.write(f"\\nVLC Error Details:\\n{vlc_result}\\n")
+        logging.info(f"Saved error log: {error_log_path}")
     except Exception as log_error:
         logging.error(f"Failed to save error log: {log_error}")
 
     try:
-        shutil.copy2(input_path, failed_path)
-        try:
-            os.remove(input_path)
-        except Exception:
-            pass
+        if not failed_path.exists():
+            shutil.copy2(input_path, failed_path)
+            logging.info(f"Copied failed file to: {failed_path}")
     except Exception as copy_error:
-        logging.error(f"Failed to copy {input_path} to {failed_path}: {copy_error}", exc_info=True)
+        logging.error(f"Failed to copy {input_path} to {failed_path}: {copy_error}")
 
     logging.error(f"All conversion attempts failed for {input_path}")
     return False, f"Failed after {max_attempts} PyAV attempts and VLC fallback"
