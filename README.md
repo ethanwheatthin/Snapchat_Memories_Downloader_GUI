@@ -184,6 +184,32 @@ build_exe.bat
 
 The executable will be created in the `dist` folder. The build script includes necessary hidden imports for all dependencies.
 
+## 🧪 Testing
+
+The project includes comprehensive unit tests to ensure reliability:
+
+```bash
+# Install pytest
+pip install pytest
+
+# Run all tests
+python -m pytest tests/ -v
+
+# Run specific test file
+python -m pytest tests/test_filename_sanitization.py -v
+
+# Run with detailed output
+python -m pytest tests/ -v --tb=short
+```
+
+**Test Coverage:**
+- **Filename sanitation** — Ensures no trailing braces or invalid characters in filenames
+- **Atomic conversion** — Verifies temp file → validate → atomic replace workflow
+- **Video validation** — Tests ffprobe-based validation (when available)
+- **Return contracts** — Confirms consistent return types across modules
+
+**For debugging issues**, see [DEBUGGING.md](DEBUGGING.md) for detailed troubleshooting steps, ffprobe commands, and log inspection guidance.
+
 ## 📝 Important Notes
 
 - **Internet Required** — Active connection needed to download from Snapchat servers
