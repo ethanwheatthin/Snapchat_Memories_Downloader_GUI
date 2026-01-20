@@ -433,16 +433,6 @@ def process_zip_overlay(zip_path, output_dir, date_obj=None):
             if is_video:
                 success, result = merge_video_overlay(str(main_path), str(overlay_path), str(output_path))
                 if success:
-                    # Attempt to ensure merged video is portrait before renaming
-                    try:
-                        rot_ok, rot_msg = enforce_portrait_video(str(output_path))
-                        if rot_ok:
-                            logging.info(f"Ensured portrait orientation for merged video: {output_path}")
-                        else:
-                            logging.warning(f"Could not enforce portrait orientation for {output_path}: {rot_msg}")
-                    except Exception as rot_err:
-                        logging.debug(f"Error enforcing portrait orientation for merged video: {rot_err}", exc_info=True)
-
                     # Rename merged file to standard date/time format and remove originals
                     try:
                         # Use date from memories_history.json if available, otherwise use file modification time
@@ -1014,6 +1004,11 @@ class SnapchatDownloaderGUI:
                       command=self.open_output_dir, style="Secondary.TButton", width=8)
         open_out_btn.pack(side=tk.LEFT, padx=(8, 0))
         
+        # Open debug log button
+        open_log_btn = ttk.Button(output_frame, text="Open Log",
+                      command=self.open_debug_log, style="Secondary.TButton", width=10)
+        open_log_btn.pack(side=tk.LEFT, padx=(8, 0))
+        
         output_info = ttk.Label(input_card, 
                                text="Choose where to save your downloaded memories", 
                                style="Info.TLabel")
@@ -1272,6 +1267,26 @@ class SnapchatDownloaderGUI:
             webbrowser.open(f"file://{os.path.abspath(path)}")
         except Exception as e:
             messagebox.showerror("Error", f"Could not open folder: {e}")
+    
+    def open_debug_log(self):
+        """Open the debug.log file with the default text editor."""
+        log_path = "debug.log"
+        if not os.path.exists(log_path):
+            messagebox.showinfo("Log Not Found", "debug.log doesn't exist yet. It will be created when you start a download.")
+            return
+        try:
+            # Windows - open with default text editor
+            if os.name == 'nt':
+                os.startfile(log_path)
+                return
+            # macOS
+            if sys.platform == 'darwin':
+                subprocess.run(['open', log_path])
+                return
+            # Linux
+            subprocess.run(['xdg-open', log_path])
+        except Exception as e:
+            messagebox.showerror("Error", f"Could not open debug.log: {e}")
     
     def get_conversion_status(self):
         """Check what conversion tools are available and return status message."""
@@ -1724,16 +1739,6 @@ class SnapchatDownloaderGUI:
                             is_video = ext in ['.mp4', '.mov', '.m4v', '.avi', '.mkv']
 
                             if is_video:
-                                # Ensure portrait orientation for merged video
-                                try:
-                                    rot_ok, rot_msg = enforce_portrait_video(str(merged_path))
-                                    if rot_ok:
-                                        log_local("    ✓ Ensured portrait orientation")
-                                    else:
-                                        log_local(f"    ⚠ Could not enforce portrait orientation: {rot_msg}")
-                                except Exception as e:
-                                    log_local(f"    ⚠ Error enforcing portrait orientation: {e}")
-
                                 # Set video metadata - try ffmpeg first for better compatibility, then mutagen
                                 metadata_set = False
 
@@ -1852,20 +1857,6 @@ class SnapchatDownloaderGUI:
 
                     # ALWAYS set file timestamps as final step for any media type
                     # This ensures the creation/modification date is correct even if other metadata fails
-                    # Ensure portrait orientation for videos before finalizing timestamps/metadata
-                    try:
-                        if media_type == "Video":
-                            try:
-                                rot_ok, rot_msg = enforce_portrait_video(str(file_path))
-                                if rot_ok:
-                                    log_local("  ✓ Ensured portrait orientation")
-                                else:
-                                    log_local(f"  ⚠ Could not enforce portrait orientation: {rot_msg}")
-                            except Exception as e:
-                                log_local(f"  ⚠ Error enforcing portrait orientation: {e}")
-                    except Exception:
-                        pass
-
                     try:
                         set_file_timestamps(str(file_path), date_obj_local)
                         log_local("  ✓ File date set correctly")
