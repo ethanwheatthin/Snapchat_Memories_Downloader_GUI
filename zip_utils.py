@@ -329,16 +329,6 @@ def process_zip_overlay(zip_path, output_dir, date_obj=None):
                 if success:
                     logging.info(f"Video overlay merge successful for: {base}")
                     try:
-                        rot_ok, rot_msg = (True, "")
-                        try:
-                            import video_utils
-                            rot_ok, rot_msg = video_utils.enforce_portrait_video(str(output_path))
-                        except Exception:
-                            pass
-
-                        if rot_ok:
-                            logging.info(f"Ensured portrait orientation for merged video: {output_path}")
-
                         if date_obj:
                             ts = date_obj
                         else:
