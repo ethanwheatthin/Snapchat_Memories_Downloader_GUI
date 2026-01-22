@@ -8,7 +8,7 @@ A user-friendly Windows desktop application to download and preserve your Snapch
 ## 🚀 Quick Start
 
 **Download the official release executable** — The easiest way to use this tool:
-
+**YouTube Video Tutorial** - https://www.youtube.com/watch?v=DpVOyY-MCLQ&t=1s
 1. **Get the `.exe`** from the [latest release](https://github.com/ethanwheatthin/Snapchat_Memories_Downloader_GUI/releases)
 2. **Install recommended tools** (optional but highly recommended):
    - [VLC Media Player](https://www.videolan.org/) — for video format conversion
