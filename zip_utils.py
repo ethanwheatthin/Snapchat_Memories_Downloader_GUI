@@ -137,19 +137,19 @@ def merge_video_overlay(main_video_path, overlay_image_path, output_path):
             logging.warning(f"Could not determine video duration, using default loop: {probe_error}")
             video_duration = None
 
-        # Build ffmpeg command with proper overlay scaling and rotation handling
-        # The filter chain:
-        # 1. Rotate both video and overlay by 90° counterclockwise to fix metadata
-        # 2. Scale rotated overlay to match rotated video dimensions exactly
-        # 3. Overlay the scaled image on top of the video
-        # Use -loop 1 on the input to loop the image, and shortest=1 to end with video
+        # Build ffmpeg command with proper overlay scaling
+        # ffmpeg auto-rotates videos based on metadata by default (-autorotate is on),
+        # so the video frames entering the filter graph are already in correct orientation.
+        # We only need to scale the overlay image to match the (auto-rotated) video dimensions,
+        # then overlay it on top.
+        # Using -loop 1 on the image input to loop it, and shortest=1 to end with video.
         cmd = [
             'ffmpeg', '-y',
             '-loop', '1',  # Loop the image input indefinitely
             '-i', overlay_to_use,  # Use normalized overlay
             '-i', str(main_video_path),
             '-filter_complex', 
-            '[0:v]transpose=2[overlay_rotated];[1:v]transpose=2[video_rotated];[overlay_rotated][video_rotated]scale2ref[overlay][video];[video][overlay]overlay=0:0:shortest=1[outv]',
+            '[0:v][1:v]scale2ref[overlay_scaled][video];[video][overlay_scaled]overlay=0:0:shortest=1[outv]',
             '-map', '[outv]',
             '-map', '1:a?',  # Copy audio from main video if it exists
             '-c:a', 'copy',

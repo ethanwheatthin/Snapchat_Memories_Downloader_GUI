@@ -154,9 +154,9 @@ def process_zip_overlay(zip_path, output_dir, date_obj=None):
     """Process ZIP overlay files. Delegates to zip_utils."""
     return zip_utils.process_zip_overlay(zip_path, output_dir, date_obj)
 
-def download_media(url, output_path, max_retries=3, progress_callback=None, date_obj=None):
+def download_media(url, output_path, max_retries=3, progress_callback=None, date_obj=None, merge_overlay=True):
     """Download media with retry mechanism. Delegates to downloader."""
-    return downloader.download_media(url, output_path, max_retries, progress_callback, date_obj)
+    return downloader.download_media(url, output_path, max_retries, progress_callback, date_obj, merge_overlay)
 
 def validate_downloaded_file(file_path):
     """Validate downloaded file. Delegates to snap_utils."""
@@ -488,7 +488,7 @@ def process_zip_overlay(zip_path, output_dir, date_obj=None):
                 logging.debug(f"Could not clean up temp directory: {cleanup_error}")
 
 
-def download_media(url, output_path, max_retries=3, progress_callback=None, date_obj=None):
+def download_media(url, output_path, max_retries=3, progress_callback=None, date_obj=None, merge_overlay=True):
     """Download media file from URL with retry mechanism and optional progress callback.
 
     Args:
@@ -497,6 +497,7 @@ def download_media(url, output_path, max_retries=3, progress_callback=None, date
         max_retries: Number of download attempts
         progress_callback: Optional callback function for progress updates
         date_obj: Optional datetime object from memories_history.json for accurate filenames
+        merge_overlay: Whether to merge snap overlay/caption onto media (default True)
 
     Returns (True, None) on success, (False, None) on failure, or (True, [merged_files]) if ZIP overlay was processed.
     """
@@ -731,8 +732,8 @@ def merge_video_overlay(main_video_path, overlay_image_path, output_path):
     return zip_utils.merge_video_overlay(main_video_path, overlay_image_path, output_path)
 
 
-def download_media(url, output_path, max_retries=3, progress_callback=None, date_obj=None):
-    return downloader.download_media(url, output_path, max_retries, progress_callback, date_obj)
+def download_media(url, output_path, max_retries=3, progress_callback=None, date_obj=None, merge_overlay=True):
+    return downloader.download_media(url, output_path, max_retries, progress_callback, date_obj, merge_overlay)
 
 
 def validate_downloaded_file(file_path):
@@ -798,6 +799,9 @@ class SnapchatDownloaderGUI:
         
         # Timezone preference variable
         self.use_gps_tz = tk.BooleanVar(value=True)  # Use GPS for timezone by default
+        
+        # Overlay merge preference
+        self.merge_overlays = tk.BooleanVar(value=True)  # Merge snap overlays by default
         
         # Configure style
         self.setup_styles()
@@ -1105,6 +1109,26 @@ class SnapchatDownloaderGUI:
             style="Info.TLabel"
         )
         gps_tz_info.pack(anchor=tk.W, padx=(26, 0), pady=(2, 8))
+
+        # Overlay merge option
+        overlay_header = ttk.Label(input_card, text="Snap Overlay / Caption", style="Header.TLabel")
+        overlay_header.pack(anchor=tk.W, pady=(15, 8))
+
+        overlay_check = ttk.Checkbutton(
+            input_card,
+            text="Merge snap overlay / caption onto media",
+            variable=self.merge_overlays,
+            style="Card.TCheckbutton"
+        )
+        overlay_check.pack(anchor=tk.W, padx=(6, 0))
+
+        overlay_info = ttk.Label(
+            input_card,
+            text="When enabled, Snapchat captions and stickers are merged back onto photos/videos.\n"
+                 "When disabled, only the original photo/video without overlay is saved.",
+            style="Info.TLabel"
+        )
+        overlay_info.pack(anchor=tk.W, padx=(26, 0), pady=(2, 8))
 
         # Check available conversion tools and display status
         # conversion_status = self.get_conversion_status()
@@ -1665,7 +1689,8 @@ class SnapchatDownloaderGUI:
                     str(file_path),
                     max_retries=max_retries,
                     progress_callback=progress_callback,
-                    date_obj=date_obj
+                    date_obj=date_obj,
+                    merge_overlay=self.merge_overlays.get()
                 )
 
                 if download_success:
