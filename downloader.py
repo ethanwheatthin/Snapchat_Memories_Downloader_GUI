@@ -20,7 +20,7 @@ def _get_thread_id():
 
 
 
-def download_media(url, output_path, max_retries=3, progress_callback=None, date_obj=None):
+def download_media(url, output_path, max_retries=3, progress_callback=None, date_obj=None, merge_overlay=True):
     last_error = None
     
     # Create thread-safe temporary file path
@@ -102,14 +102,19 @@ def download_media(url, output_path, max_retries=3, progress_callback=None, date
                 try:
                     if progress_callback:
                         progress_callback("Downloaded ZIP archive, processing...")
-                    merged = zip_utils.process_zip_overlay(write_path, str(Path(output_path).parent), date_obj)
-                    if merged:
-                        try:
-                            os.remove(write_path)
-                        except Exception:
-                            pass
-                        logging.info(f"Created merged images: {merged}")
-                        return (True, merged)
+                    
+                    # Only attempt overlay merge if user has enabled it
+                    if merge_overlay:
+                        merged = zip_utils.process_zip_overlay(write_path, str(Path(output_path).parent), date_obj)
+                        if merged:
+                            try:
+                                os.remove(write_path)
+                            except Exception:
+                                pass
+                            logging.info(f"Created merged images: {merged}")
+                            return (True, merged)
+                    else:
+                        logging.info("Overlay merge disabled by user, extracting original media only")
 
                     if zip_utils.extract_media_from_zip(write_path, str(output_path)):
                         try:

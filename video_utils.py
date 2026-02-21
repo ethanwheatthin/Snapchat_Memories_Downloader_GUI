@@ -32,6 +32,14 @@ try:
 except Exception:
     HAS_VLC = False
 
+# PIL for frame rotation during video conversion
+HAS_PIL = False
+try:
+    from PIL import Image as PILImage
+    HAS_PIL = True
+except Exception:
+    HAS_PIL = False
+
 
 def sanitize_path(path):
     """Sanitize file path by stripping trailing invalid characters and normalizing.
@@ -53,6 +61,65 @@ def sanitize_path(path):
     
     # Convert to Path and resolve to absolute
     return Path(path_str).resolve()
+
+
+def _get_video_rotation(file_path):
+    """Detect rotation metadata from a video file.
+    
+    Snapchat videos are often stored in landscape resolution with a rotation
+    metadata tag that tells players to display them in portrait. When re-encoding,
+    this rotation must be applied to the frames to preserve correct orientation.
+    
+    Returns:
+        int: Rotation in degrees (0, 90, 180, 270). 0 means no rotation needed.
+    """
+    rotation = 0
+    
+    # Try ffprobe first (most reliable)
+    if check_ffmpeg():
+        try:
+            import json as _json
+            cmd = [
+                'ffprobe', '-v', 'error', '-select_streams', 'v:0',
+                '-show_entries', 'stream_tags=rotate:stream_side_data_list',
+                '-of', 'json', str(file_path)
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10, creationflags=CREATE_NO_WINDOW)
+            if result.returncode == 0 and result.stdout.strip():
+                data = _json.loads(result.stdout)
+                streams = data.get('streams', [])
+                if streams:
+                    tags = streams[0].get('tags', {})
+                    if 'rotate' in tags:
+                        rotation = int(tags['rotate'])
+                    # Also check side_data_list for display matrix rotation
+                    side_data = streams[0].get('side_data_list', [])
+                    for sd in side_data:
+                        if sd.get('side_data_type') == 'Display Matrix' and 'rotation' in sd:
+                            rotation = int(float(sd['rotation']))
+        except Exception as e:
+            logging.debug(f"Could not detect rotation via ffprobe: {e}")
+    
+    # Try PyAV metadata fallback
+    if rotation == 0 and HAS_PYAV:
+        try:
+            container = av.open(str(file_path))
+            vstream = container.streams.video[0]
+            # Check stream metadata for rotate tag
+            if hasattr(vstream, 'metadata') and vstream.metadata:
+                rotate_val = vstream.metadata.get('rotate', '0')
+                rotation = int(rotate_val)
+            container.close()
+        except Exception as e:
+            logging.debug(f"Could not detect rotation via PyAV: {e}")
+    
+    # Normalize to 0-359 range, handle negative values
+    rotation = rotation % 360
+    if rotation < 0:
+        rotation += 360
+    
+    logging.debug(f"Detected rotation for {file_path}: {rotation}°")
+    return rotation
 
 
 def check_ffmpeg():
@@ -355,12 +422,38 @@ def set_video_metadata(file_path, date_obj, latitude, longitude, timezone_offset
             except Exception:
                 pass
 
+            # CRITICAL for iCloud/Apple Photos: Set Apple-specific creation date
+            # iCloud reads 'com.apple.quicktime.creationdate' for the "date taken"
+            # Without this, iCloud may show videos with wrong dates (e.g., 01/08/1970)
+            try:
+                from mutagen.mp4 import MP4FreeForm, AtomDataType
+                video["----:com.apple.quicktime:creationdate"] = [
+                    MP4FreeForm(creation_time.encode('utf-8'), dataformat=AtomDataType.UTF8)
+                ]
+                logging.debug(f"Set Apple QuickTime creationdate: {creation_time}")
+            except (ImportError, AttributeError):
+                # Fallback for older mutagen versions
+                video["----:com.apple.quicktime:creationdate"] = [creation_time.encode('utf-8')]
+                logging.debug(f"Set Apple QuickTime creationdate (fallback): {creation_time}")
+
             # Add GPS metadata if available
             if latitude is not None and longitude is not None:
                 location_str = f"{latitude:+.6f}{longitude:+.6f}/"
-                video["----:com.apple.quicktime:location-ISO6709"] = location_str.encode('utf-8')
-                video["----:com.apple.quicktime:latitude"] = str(latitude).encode('utf-8')
-                video["----:com.apple.quicktime:longitude"] = str(longitude).encode('utf-8')
+                try:
+                    from mutagen.mp4 import MP4FreeForm, AtomDataType
+                    video["----:com.apple.quicktime:location-ISO6709"] = [
+                        MP4FreeForm(location_str.encode('utf-8'), dataformat=AtomDataType.UTF8)
+                    ]
+                    video["----:com.apple.quicktime:latitude"] = [
+                        MP4FreeForm(str(latitude).encode('utf-8'), dataformat=AtomDataType.UTF8)
+                    ]
+                    video["----:com.apple.quicktime:longitude"] = [
+                        MP4FreeForm(str(longitude).encode('utf-8'), dataformat=AtomDataType.UTF8)
+                    ]
+                except (ImportError, AttributeError):
+                    video["----:com.apple.quicktime:location-ISO6709"] = [location_str.encode('utf-8')]
+                    video["----:com.apple.quicktime:latitude"] = [str(latitude).encode('utf-8')]
+                    video["----:com.apple.quicktime:longitude"] = [str(longitude).encode('utf-8')]
                 logging.info(f"Setting GPS metadata via mutagen: lat={latitude}, lon={longitude} for {file_path}")
             else:
                 logging.info(f"No GPS data available for video (mutagen): {file_path}")
@@ -423,7 +516,23 @@ def set_video_metadata_ffmpeg(file_path, date_obj, latitude, longitude, timezone
         else:
             creation_time_str = date_obj.strftime("%Y-%m-%dT%H:%M:%S")
         
-        cmd = ['ffmpeg', '-y', '-i', str(file_path), '-c', 'copy', '-metadata', f'creation_time={creation_time_str}', '-metadata', f'date={creation_time_str}']
+        # Also create a UTC version for the moov header (QuickTime standard)
+        # iCloud reads creation_time from moov.mvhd which expects UTC
+        utc_creation_str = date_obj.strftime("%Y-%m-%dT%H:%M:%S")
+        if timezone_offset:
+            utc_creation_str = creation_time_str  # ffmpeg handles TZ conversion internally
+        else:
+            utc_creation_str = creation_time_str + "Z"
+        
+        cmd = [
+            'ffmpeg', '-y', '-i', str(file_path), '-c', 'copy',
+            '-metadata', f'creation_time={utc_creation_str}',
+            '-metadata', f'date={creation_time_str}',
+            # Apple-specific metadata for iCloud/Apple Photos compatibility
+            # This is the primary tag iCloud uses for "date taken" on videos
+            '-metadata', f'com.apple.quicktime.creationdate={creation_time_str}',
+            '-movflags', '+use_metadata_tags',
+        ]
         
         # Add location metadata if available
         if latitude is not None and longitude is not None:
@@ -659,12 +768,26 @@ def convert_hevc_to_h264(input_path, output_path=None, max_attempts=3, failed_di
             input_container = av.open(str(input_path))
             input_video_stream = input_container.streams.video[0]
 
+            # Detect rotation metadata BEFORE opening output container
+            rotation = _get_video_rotation(input_path)
+            needs_rotation = rotation in (90, 180, 270) and HAS_PIL
+            if rotation in (90, 180, 270) and not HAS_PIL:
+                logging.warning(f"[{conversion_id}] Video has {rotation}° rotation but PIL not available - orientation may be incorrect")
+            if needs_rotation:
+                logging.info(f"[{conversion_id}] Video has {rotation}° rotation metadata - will apply during conversion")
+
             logging.info(f"[{conversion_id}] Creating temp output: {temp_output}")
             output_container = av.open(str(temp_output), 'w')
 
             output_video_stream = output_container.add_stream('h264', rate=input_video_stream.average_rate)
-            output_video_stream.width = input_video_stream.width
-            output_video_stream.height = input_video_stream.height
+            # Swap width/height for 90° or 270° rotation so portrait videos stay portrait
+            if rotation in (90, 270):
+                output_video_stream.width = input_video_stream.height
+                output_video_stream.height = input_video_stream.width
+                logging.info(f"[{conversion_id}] Swapping dimensions: {input_video_stream.width}x{input_video_stream.height} -> {input_video_stream.height}x{input_video_stream.width}")
+            else:
+                output_video_stream.width = input_video_stream.width
+                output_video_stream.height = input_video_stream.height
             output_video_stream.pix_fmt = 'yuv420p'
             output_video_stream.bit_rate = input_video_stream.bit_rate or 2000000
 
@@ -680,8 +803,40 @@ def convert_hevc_to_h264(input_path, output_path=None, max_attempts=3, failed_di
             for packet in input_container.demux():
                 if packet.stream.type == 'video':
                     for frame in packet.decode():
-                        for out_packet in output_video_stream.encode(frame):
-                            output_container.mux(out_packet)
+                        if needs_rotation:
+                            # Apply rotation via PIL to preserve correct orientation
+                            # PIL's rotate() is counterclockwise, so we negate for clockwise
+                            try:
+                                img = frame.to_image()
+                                if rotation == 90:
+                                    # 90° CW = transpose ROTATE_270 in PIL
+                                    try:
+                                        img = img.transpose(PILImage.Transpose.ROTATE_270)
+                                    except AttributeError:
+                                        img = img.rotate(-90, expand=True)
+                                elif rotation == 270:
+                                    # 270° CW = transpose ROTATE_90 in PIL
+                                    try:
+                                        img = img.transpose(PILImage.Transpose.ROTATE_90)
+                                    except AttributeError:
+                                        img = img.rotate(-270, expand=True)
+                                elif rotation == 180:
+                                    try:
+                                        img = img.transpose(PILImage.Transpose.ROTATE_180)
+                                    except AttributeError:
+                                        img = img.rotate(180, expand=True)
+                                rotated_frame = av.VideoFrame.from_image(img)
+                                rotated_frame.pts = frame.pts
+                                rotated_frame.time_base = frame.time_base
+                                for out_packet in output_video_stream.encode(rotated_frame):
+                                    output_container.mux(out_packet)
+                            except Exception as rot_err:
+                                logging.warning(f"[{conversion_id}] Frame rotation failed, using original: {rot_err}")
+                                for out_packet in output_video_stream.encode(frame):
+                                    output_container.mux(out_packet)
+                        else:
+                            for out_packet in output_video_stream.encode(frame):
+                                output_container.mux(out_packet)
                 elif packet.stream.type == 'audio' and output_audio_stream:
                     for frame in packet.decode():
                         for out_packet in output_audio_stream.encode(frame):
