@@ -84,11 +84,14 @@ python download_snapchat_memories_gui.py
 
 7. **Wait 24-48 hours** for Snapchat to prepare your data
 8. **Download the ZIP** when you receive the email from Snapchat
-9. **Extract the ZIP** (right-click → "Extract All..." on Windows):
+
+> **Note:** If you have multiple zip files available for download, only the first (non-numbered) folder contains the `memories_history.json` file.
+> 
+10. **Extract the ZIP** (right-click → "Extract All..." on Windows):
 
    ![Unzipped Folder](images/Unzipped_folder.png)
 
-10. Locate `memories_history.json` in the extracted folder (usually in the root or `json` subfolder)
+11. Locate `memories_history.json` in the extracted folder (usually in the root or `json` subfolder)
 
 ## 📖 How to Use
 
