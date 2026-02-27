@@ -71,7 +71,8 @@ def _get_video_rotation(file_path):
     this rotation must be applied to the frames to preserve correct orientation.
     
     Returns:
-        int: Rotation in degrees (0, 90, 180, 270). 0 means no rotation needed.
+        int: Clockwise rotation in degrees (0, 90, 180, 270) needed to display
+             the video frames correctly. 0 means no rotation needed.
     """
     rotation = 0
     
@@ -91,12 +92,22 @@ def _get_video_rotation(file_path):
                 if streams:
                     tags = streams[0].get('tags', {})
                     if 'rotate' in tags:
+                        # The 'rotate' tag directly gives the CW rotation needed
                         rotation = int(tags['rotate'])
-                    # Also check side_data_list for display matrix rotation
-                    side_data = streams[0].get('side_data_list', [])
-                    for sd in side_data:
-                        if sd.get('side_data_type') == 'Display Matrix' and 'rotation' in sd:
-                            rotation = int(float(sd['rotation']))
+                    
+                    # Only fall back to Display Matrix if 'rotate' tag was not found.
+                    # IMPORTANT: The Display Matrix 'rotation' value has the OPPOSITE
+                    # sign convention from the 'rotate' tag.  rotate=90 (CW) corresponds
+                    # to Display Matrix rotation=-90.  We negate the display matrix value
+                    # to obtain the clockwise rotation needed.
+                    # (Newer ffmpeg versions drop the 'rotate' tag entirely, so this
+                    # fallback is essential for those builds.)
+                    if rotation == 0:
+                        side_data = streams[0].get('side_data_list', [])
+                        for sd in side_data:
+                            if sd.get('side_data_type') == 'Display Matrix' and 'rotation' in sd:
+                                rotation = -int(float(sd['rotation']))
+                                logging.debug(f"Using Display Matrix rotation (negated): {rotation}° for {file_path}")
         except Exception as e:
             logging.debug(f"Could not detect rotation via ffprobe: {e}")
     
@@ -592,9 +603,10 @@ def enforce_portrait_video(file_path, timeout=300):
     # Try ffprobe/ffmpeg first
     if check_ffmpeg():
         try:
+            # Query dimensions, rotate tag, AND display matrix (side_data_list)
             cmd = [
                 'ffprobe', '-v', 'error', '-select_streams', 'v:0',
-                '-show_entries', 'stream=width,height:stream_tags=rotate',
+                '-show_entries', 'stream=width,height:stream_tags=rotate:stream_side_data_list',
                 '-of', 'json', file_path
             ]
             res = subprocess.run(cmd, capture_output=True, text=True, timeout=10, creationflags=CREATE_NO_WINDOW)
@@ -607,6 +619,18 @@ def enforce_portrait_video(file_path, timeout=300):
                 height = int(s.get('height', 0))
                 tags = s.get('tags') or {}
                 rotate_tag = tags.get('rotate') if tags else None
+
+                # If no 'rotate' tag, check Display Matrix (newer ffmpeg builds)
+                # Display Matrix rotation is the negative of the CW rotation needed
+                if rotate_tag is None:
+                    side_data = s.get('side_data_list', [])
+                    for sd in (side_data or []):
+                        if sd.get('side_data_type') == 'Display Matrix' and 'rotation' in sd:
+                            dm_rotation = -int(float(sd['rotation']))
+                            if dm_rotation != 0:
+                                rotate_tag = str(dm_rotation)
+                                logging.debug(f"enforce_portrait: using Display Matrix rotation (negated): {dm_rotation}°")
+                            break
 
                 need_rotate = False
                 vf = None
@@ -634,11 +658,20 @@ def enforce_portrait_video(file_path, timeout=300):
                     return True, "Already portrait"
 
                 out_path = f"{file_path}.rotated{Path(file_path).suffix}"
+                # CRITICAL: -noautorotate prevents ffmpeg from auto-applying the
+                # display matrix rotation on decode.  Without this flag, ffmpeg ≥5
+                # rotates frames automatically, and our -vf transpose then applies
+                # a SECOND rotation, producing an upside-down or landscape result.
                 ffmpeg_cmd = [
-                    'ffmpeg', '-y', '-i', file_path,
+                    'ffmpeg', '-y',
+                    '-display_rotation', '0',   # Strip display matrix from input so it's not carried to output
+                    '-noautorotate',             # Prevent ffmpeg from auto-applying rotation during decode
+                    '-i', file_path,
                     '-vf', vf,
                     '-c:v', 'libx264', '-crf', '18', '-preset', 'veryfast',
-                    '-c:a', 'copy', out_path
+                    '-c:a', 'copy',
+                    '-metadata:s:v:0', 'rotate=0',   # Also strip rotate tag if present
+                    out_path
                 ]
                 proc = subprocess.run(ffmpeg_cmd, capture_output=True, text=True, timeout=timeout, creationflags=CREATE_NO_WINDOW)
                 if proc.returncode == 0 and os.path.exists(out_path) and os.path.getsize(out_path) > 1000:
@@ -735,6 +768,107 @@ def enforce_portrait_video(file_path, timeout=300):
     return False, "No available method to rotate video or rotation not needed"
 
 
+def _convert_with_ffmpeg(input_path, output_path=None):
+    """Convert video to H.264 using ffmpeg with proper rotation handling.
+    
+    Detects rotation metadata, bakes it into frames, and strips the display
+    matrix so all players (including Windows Media Player and Photos) show
+    the video in correct orientation.
+    
+    Args:
+        input_path: Path to input video
+        output_path: Optional output path (default: input_stem_converted.mp4)
+        
+    Returns:
+        Tuple of (success: bool, result: Path or error_message: str)
+    """
+    if not check_ffmpeg():
+        return False, "ffmpeg not available"
+    
+    input_path = sanitize_path(input_path)
+    if output_path is None:
+        output_path = input_path.parent / f"{input_path.stem}_converted{input_path.suffix}"
+    else:
+        output_path = sanitize_path(output_path)
+    
+    temp_output = output_path.parent / f"{output_path.stem}.temp{output_path.suffix}"
+    
+    try:
+        # Detect rotation to determine if we need a video filter
+        rotation = _get_video_rotation(input_path)
+        
+        vf = None
+        if rotation == 90:
+            vf = 'transpose=1'
+        elif rotation == 270:
+            vf = 'transpose=2'
+        elif rotation == 180:
+            vf = 'transpose=1,transpose=1'
+        
+        cmd = [
+            'ffmpeg', '-y',
+            '-display_rotation', '0',   # Strip display matrix from input
+            '-noautorotate',             # Prevent auto-rotation during decode
+            '-i', str(input_path),
+        ]
+        
+        if vf:
+            cmd.extend(['-vf', vf])
+            logging.info(f"ffmpeg conversion: applying {rotation}° rotation via -vf {vf}")
+        
+        cmd.extend([
+            '-c:v', 'libx264', '-crf', '18', '-preset', 'veryfast',
+            '-c:a', 'copy',
+            '-metadata:s:v:0', 'rotate=0',  # Strip rotate tag
+            str(temp_output)
+        ])
+        
+        logging.info(f"ffmpeg conversion command: {' '.join(cmd)}")
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300, creationflags=CREATE_NO_WINDOW)
+        
+        if proc.returncode != 0:
+            logging.error(f"ffmpeg conversion failed: {proc.stderr}")
+            if temp_output.exists():
+                temp_output.unlink()
+            return False, f"ffmpeg failed: {proc.stderr[:200]}"
+        
+        # Validate output
+        is_valid, validation_info = validate_video_file(temp_output)
+        if not is_valid:
+            logging.warning(f"ffmpeg output validation failed: {validation_info.get('error')}")
+            if temp_output.exists():
+                temp_output.unlink()
+            return False, f"Validation failed: {validation_info.get('error')}"
+        
+        # Atomic replace
+        try:
+            os.replace(str(temp_output), str(output_path))
+            logging.info(f"ffmpeg conversion successful: {output_path}")
+            return True, output_path
+        except Exception as e:
+            logging.error(f"Failed to replace file after ffmpeg conversion: {e}")
+            if temp_output.exists():
+                temp_output.unlink()
+            return False, f"Failed to replace file: {e}"
+    
+    except subprocess.TimeoutExpired:
+        logging.error("ffmpeg conversion timed out after 300 seconds")
+        if temp_output.exists():
+            try:
+                temp_output.unlink()
+            except Exception:
+                pass
+        return False, "ffmpeg conversion timed out"
+    except Exception as e:
+        logging.error(f"ffmpeg conversion error: {e}", exc_info=True)
+        if temp_output.exists():
+            try:
+                temp_output.unlink()
+            except Exception:
+                pass
+        return False, str(e)
+
+
 def convert_hevc_to_h264(input_path, output_path=None, max_attempts=3, failed_dir_path="downloads/failed_conversions"):
     """Convert video to H.264 using atomic temp file approach with validation.
     
@@ -744,7 +878,14 @@ def convert_hevc_to_h264(input_path, output_path=None, max_attempts=3, failed_di
     input_path = sanitize_path(input_path)
     
     if not HAS_PYAV:
-        logging.warning("PyAV not installed. Attempting VLC fallback...")
+        logging.warning("PyAV not installed. Attempting ffmpeg then VLC fallback...")
+        # Try ffmpeg-based conversion with proper rotation handling first
+        if check_ffmpeg():
+            success, result = _convert_with_ffmpeg(input_path, output_path)
+            if success:
+                return success, result
+            logging.warning("ffmpeg conversion failed, trying VLC...")
+        # Fall back to VLC (note: VLC preserves display matrix for player handling)
         return convert_with_vlc(input_path, output_path)
 
     # Use temp file in same directory for atomic replace
@@ -902,11 +1043,21 @@ def convert_hevc_to_h264(input_path, output_path=None, max_attempts=3, failed_di
             
             time.sleep(0.5)
 
-    # All PyAV attempts exhausted - try VLC fallback
-    logging.info(f"All PyAV attempts failed for {input_path}. Trying VLC fallback...")
+    # All PyAV attempts exhausted - try ffmpeg direct, then VLC fallback
+    logging.info(f"All PyAV attempts failed for {input_path}. Trying ffmpeg direct conversion...")
+    
+    # Try ffmpeg direct conversion (handles rotation properly)
+    if check_ffmpeg():
+        ffmpeg_success, ffmpeg_result = _convert_with_ffmpeg(input_path, output_path)
+        if ffmpeg_success:
+            return ffmpeg_success, ffmpeg_result
+        logging.warning(f"ffmpeg direct conversion also failed: {ffmpeg_result}")
+    
     time.sleep(1)
     
     # VLC fallback also uses temp file
+    # NOTE: VLC doesn't apply rotation - after VLC transcodes, we use ffmpeg to
+    # strip/bake the display matrix so Windows players show correct orientation
     vlc_temp = output_path.parent / f"{output_path.stem}.vlc_temp{output_path.suffix}"
     vlc_success, vlc_result = convert_with_vlc(input_path, vlc_temp)
     
@@ -914,14 +1065,38 @@ def convert_hevc_to_h264(input_path, output_path=None, max_attempts=3, failed_di
         # Validate VLC output
         is_valid, validation_info = validate_video_file(vlc_temp)
         if is_valid:
-            try:
-                os.replace(str(vlc_temp), str(output_path))
-                logging.info(f"VLC fallback conversion successful: {output_path}")
-                return True, output_path
-            except Exception as e:
-                logging.error(f"Failed to replace after VLC conversion: {e}")
+            # After VLC transcodes the codec, use ffmpeg to fix rotation
+            rotation = _get_video_rotation(vlc_temp)
+            if rotation in (90, 180, 270) and check_ffmpeg():
+                logging.info(f"VLC output has {rotation}° rotation - applying via ffmpeg post-process...")
+                ffmpeg_fix_success, ffmpeg_fix_result = _convert_with_ffmpeg(vlc_temp, output_path)
                 if vlc_temp.exists():
-                    vlc_temp.unlink()
+                    try:
+                        vlc_temp.unlink()
+                    except Exception:
+                        pass
+                if ffmpeg_fix_success:
+                    logging.info(f"VLC + ffmpeg rotation fix successful: {output_path}")
+                    return True, output_path
+                else:
+                    logging.warning(f"ffmpeg rotation fix after VLC failed: {ffmpeg_fix_result}")
+                    # Fall through - still try to use the VLC output as-is
+                    # Re-run VLC since we deleted vlc_temp
+                    vlc_success, vlc_result = convert_with_vlc(input_path, vlc_temp)
+                    if not vlc_success:
+                        # Can't recover
+                        pass
+            
+            # No rotation needed or ffmpeg not available - use VLC output directly
+            if vlc_temp.exists():
+                try:
+                    os.replace(str(vlc_temp), str(output_path))
+                    logging.info(f"VLC fallback conversion successful: {output_path}")
+                    return True, output_path
+                except Exception as e:
+                    logging.error(f"Failed to replace after VLC conversion: {e}")
+                    if vlc_temp.exists():
+                        vlc_temp.unlink()
         else:
             logging.warning(f"VLC conversion validation failed: {validation_info.get('error')}")
             if vlc_temp.exists():
