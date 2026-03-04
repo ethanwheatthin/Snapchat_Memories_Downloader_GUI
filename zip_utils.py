@@ -15,7 +15,7 @@ CREATE_NO_WINDOW = 0x08000000 if sys.platform == 'win32' else 0
 # Pillow detection
 HAS_PIL = False
 try:
-    from PIL import Image as PILImage
+    from PIL import Image as PILImage, ImageOps as PILImageOps
     HAS_PIL = True
 except Exception:
     HAS_PIL = False
@@ -121,8 +121,15 @@ def merge_images(main_img_path, overlay_img_path, output_path):
         return False, "Pillow not installed"
 
     try:
-        main = PILImage.open(main_img_path).convert('RGBA')
-        overlay = PILImage.open(overlay_img_path).convert('RGBA')
+        # Apply EXIF orientation before compositing so both images
+        # are in correct display orientation (prevents landscape/portrait mismatch)
+        main_raw = PILImage.open(main_img_path)
+        main_raw = PILImageOps.exif_transpose(main_raw) or main_raw
+        main = main_raw.convert('RGBA')
+
+        overlay_raw = PILImage.open(overlay_img_path)
+        overlay_raw = PILImageOps.exif_transpose(overlay_raw) or overlay_raw
+        overlay = overlay_raw.convert('RGBA')
 
         if overlay.size != main.size:
             overlay = overlay.resize(main.size, PILImage.LANCZOS)

@@ -596,130 +596,90 @@ def set_video_metadata_ffmpeg(file_path, date_obj, latitude, longitude, timezone
 
 
 def enforce_portrait_video(file_path, timeout=300):
-    # This function intentionally mirrors the main implementation so GUI code can call it unchanged
+    """Apply rotation metadata to video frames so the file displays correctly.
+    
+    Only rotates when explicit rotation metadata (rotate tag or display matrix)
+    is present. Does NOT blindly force landscape videos to portrait — genuinely
+    landscape content is left untouched.
+    
+    Uses ffmpeg auto-rotation (default) which is the most reliable approach
+    across ffmpeg versions.
+    """
     if not os.path.exists(file_path):
         return False, "File not found"
 
-    # Try ffprobe/ffmpeg first
+    # Detect rotation from metadata
+    rotation = _get_video_rotation(file_path)
+    
+    if rotation not in (90, 180, 270):
+        # No rotation metadata (or rotation=0). Leave the video as-is.
+        # Genuinely landscape content should NOT be forced to portrait.
+        return True, "No rotation needed"
+
+    # Try ffmpeg first — let it auto-rotate naturally
     if check_ffmpeg():
         try:
-            # Query dimensions, rotate tag, AND display matrix (side_data_list)
-            cmd = [
-                'ffprobe', '-v', 'error', '-select_streams', 'v:0',
-                '-show_entries', 'stream=width,height:stream_tags=rotate:stream_side_data_list',
-                '-of', 'json', file_path
+            out_path = f"{file_path}.rotated{Path(file_path).suffix}"
+            # Let ffmpeg auto-rotate (default behaviour): it reads the display
+            # matrix / rotate tag, applies the rotation during decode, and produces
+            # output with correct orientation and no leftover rotation metadata.
+            ffmpeg_cmd = [
+                'ffmpeg', '-y',
+                '-i', file_path,
+                '-c:v', 'libx264', '-crf', '18', '-preset', 'veryfast',
+                '-c:a', 'copy',
+                '-metadata:s:v:0', 'rotate=0',   # Strip any leftover rotate tag
+                out_path
             ]
-            res = subprocess.run(cmd, capture_output=True, text=True, timeout=10, creationflags=CREATE_NO_WINDOW)
-            import json
-            info = json.loads(res.stdout) if res.stdout else {}
-            streams = info.get('streams', [])
-            if streams:
-                s = streams[0]
-                width = int(s.get('width', 0))
-                height = int(s.get('height', 0))
-                tags = s.get('tags') or {}
-                rotate_tag = tags.get('rotate') if tags else None
-
-                # If no 'rotate' tag, check Display Matrix (newer ffmpeg builds)
-                # Display Matrix rotation is the negative of the CW rotation needed
-                if rotate_tag is None:
-                    side_data = s.get('side_data_list', [])
-                    for sd in (side_data or []):
-                        if sd.get('side_data_type') == 'Display Matrix' and 'rotation' in sd:
-                            dm_rotation = -int(float(sd['rotation']))
-                            if dm_rotation != 0:
-                                rotate_tag = str(dm_rotation)
-                                logging.debug(f"enforce_portrait: using Display Matrix rotation (negated): {dm_rotation}°")
-                            break
-
-                need_rotate = False
-                vf = None
-
-                if rotate_tag is not None:
+            logging.info(f"enforce_portrait: applying {rotation}° via ffmpeg auto-rotate")
+            proc = subprocess.run(ffmpeg_cmd, capture_output=True, text=True, timeout=timeout, creationflags=CREATE_NO_WINDOW)
+            if proc.returncode == 0 and os.path.exists(out_path) and os.path.getsize(out_path) > 1000:
+                try:
+                    backup = f"{file_path}.backup"
+                    shutil.move(file_path, backup)
+                    shutil.move(out_path, file_path)
                     try:
-                        r = int(rotate_tag) % 360
-                        if r == 90:
-                            need_rotate = True
-                            vf = 'transpose=1'
-                        elif r == 270:
-                            need_rotate = True
-                            vf = 'transpose=2'
-                        elif r == 180:
-                            need_rotate = True
-                            vf = 'transpose=1,transpose=1'
+                        os.remove(backup)
                     except Exception:
                         pass
-                else:
-                    if width > height:
-                        need_rotate = True
-                        vf = 'transpose=1'
-
-                if not need_rotate:
-                    return True, "Already portrait"
-
-                out_path = f"{file_path}.rotated{Path(file_path).suffix}"
-                # CRITICAL: -noautorotate prevents ffmpeg from auto-applying the
-                # display matrix rotation on decode.  Without this flag, ffmpeg ≥5
-                # rotates frames automatically, and our -vf transpose then applies
-                # a SECOND rotation, producing an upside-down or landscape result.
-                ffmpeg_cmd = [
-                    'ffmpeg', '-y',
-                    '-display_rotation', '0',   # Strip display matrix from input so it's not carried to output
-                    '-noautorotate',             # Prevent ffmpeg from auto-applying rotation during decode
-                    '-i', file_path,
-                    '-vf', vf,
-                    '-c:v', 'libx264', '-crf', '18', '-preset', 'veryfast',
-                    '-c:a', 'copy',
-                    '-metadata:s:v:0', 'rotate=0',   # Also strip rotate tag if present
-                    out_path
-                ]
-                proc = subprocess.run(ffmpeg_cmd, capture_output=True, text=True, timeout=timeout, creationflags=CREATE_NO_WINDOW)
-                if proc.returncode == 0 and os.path.exists(out_path) and os.path.getsize(out_path) > 1000:
+                    return True, file_path
+                except Exception as e:
                     try:
-                        backup = f"{file_path}.backup"
-                        shutil.move(file_path, backup)
-                        shutil.move(out_path, file_path)
-                        try:
-                            os.remove(backup)
-                        except Exception:
-                            pass
-                        return True, file_path
-                    except Exception as e:
-                        try:
-                            if os.path.exists(backup) and not os.path.exists(file_path):
-                                shutil.move(backup, file_path)
-                        except Exception:
-                            pass
-                        if os.path.exists(out_path):
-                            os.remove(out_path)
-                        return False, f"Failed to replace original: {e}"
-                else:
+                        if os.path.exists(backup) and not os.path.exists(file_path):
+                            shutil.move(backup, file_path)
+                    except Exception:
+                        pass
                     if os.path.exists(out_path):
-                        try:
-                            os.remove(out_path)
-                        except Exception:
-                            pass
-                    return False, f"ffmpeg failed: {proc.stderr}"
+                        os.remove(out_path)
+                    return False, f"Failed to replace original: {e}"
+            else:
+                if os.path.exists(out_path):
+                    try:
+                        os.remove(out_path)
+                    except Exception:
+                        pass
+                return False, f"ffmpeg failed: {proc.stderr}"
         except Exception as e:
             logging.debug(f"ffmpeg portrait enforcement error: {e}", exc_info=True)
 
-    # Fallback to PyAV if available
+    # Fallback to PyAV if available — only rotate per metadata
     if HAS_PYAV:
         try:
             input_container = av.open(file_path)
             vstream = input_container.streams.video[0]
-            width = vstream.width
-            height = vstream.height
-            need_rotate = width > height
-            if not need_rotate:
-                input_container.close()
-                return True, "Already portrait"
+            coded_w = vstream.width
+            coded_h = vstream.height
 
             out_path = f"{file_path}.rotated{Path(file_path).suffix}"
             output_container = av.open(out_path, 'w')
             output_vs = output_container.add_stream('h264', rate=vstream.average_rate)
-            output_vs.width = height
-            output_vs.height = width
+
+            if rotation in (90, 270):
+                output_vs.width = coded_h
+                output_vs.height = coded_w
+            else:
+                output_vs.width = coded_w
+                output_vs.height = coded_h
             output_vs.pix_fmt = 'yuv420p'
 
             output_audio = None
@@ -732,7 +692,22 @@ def enforce_portrait_video(file_path, timeout=300):
             for packet in input_container.demux():
                 if packet.stream.type == 'video':
                     for frame in packet.decode():
-                        img = frame.to_image().rotate(90, expand=True)
+                        img = frame.to_image()
+                        if rotation == 90:
+                            try:
+                                img = img.transpose(PILImage.Transpose.ROTATE_270)
+                            except AttributeError:
+                                img = img.rotate(-90, expand=True)
+                        elif rotation == 270:
+                            try:
+                                img = img.transpose(PILImage.Transpose.ROTATE_90)
+                            except AttributeError:
+                                img = img.rotate(-270, expand=True)
+                        elif rotation == 180:
+                            try:
+                                img = img.transpose(PILImage.Transpose.ROTATE_180)
+                            except AttributeError:
+                                img = img.rotate(180, expand=True)
                         new_frame = av.VideoFrame.from_image(img)
                         for out_packet in output_vs.encode(new_frame):
                             output_container.mux(out_packet)
@@ -769,11 +744,15 @@ def enforce_portrait_video(file_path, timeout=300):
 
 
 def _convert_with_ffmpeg(input_path, output_path=None):
-    """Convert video to H.264 using ffmpeg with proper rotation handling.
+    """Convert video to H.264 using ffmpeg, relying on ffmpeg's auto-rotation.
     
-    Detects rotation metadata, bakes it into frames, and strips the display
-    matrix so all players (including Windows Media Player and Photos) show
-    the video in correct orientation.
+    ffmpeg's default behaviour (auto-rotation enabled) decodes frames in?
+    the correct display orientation and strips the display matrix from the
+    output.  Previous versions of this function used -noautorotate plus a
+    manual transpose filter, but that combination is fragile across ffmpeg
+    versions and can cause double-rotation (the display matrix is sometimes
+    propagated to the output even with -noautorotate, so players rotate the
+    already-rotated frames a second time).
     
     Args:
         input_path: Path to input video
@@ -794,36 +773,21 @@ def _convert_with_ffmpeg(input_path, output_path=None):
     temp_output = output_path.parent / f"{output_path.stem}.temp{output_path.suffix}"
     
     try:
-        # Detect rotation to determine if we need a video filter
-        rotation = _get_video_rotation(input_path)
-        
-        vf = None
-        if rotation == 90:
-            vf = 'transpose=1'
-        elif rotation == 270:
-            vf = 'transpose=2'
-        elif rotation == 180:
-            vf = 'transpose=1,transpose=1'
-        
+        # Let ffmpeg handle rotation automatically:
+        # 1. ffmpeg decodes frames and auto-applies display matrix / rotate tag
+        # 2. Output frames are in correct display orientation
+        # 3. We strip the rotate tag just in case; the display matrix is consumed
+        #    during auto-rotation and will not be written to the output.
         cmd = [
             'ffmpeg', '-y',
-            '-display_rotation', '0',   # Strip display matrix from input
-            '-noautorotate',             # Prevent auto-rotation during decode
             '-i', str(input_path),
-        ]
-        
-        if vf:
-            cmd.extend(['-vf', vf])
-            logging.info(f"ffmpeg conversion: applying {rotation}° rotation via -vf {vf}")
-        
-        cmd.extend([
             '-c:v', 'libx264', '-crf', '18', '-preset', 'veryfast',
             '-c:a', 'copy',
-            '-metadata:s:v:0', 'rotate=0',  # Strip rotate tag
+            '-metadata:s:v:0', 'rotate=0',  # Strip any leftover rotate tag
             str(temp_output)
-        ])
+        ]
         
-        logging.info(f"ffmpeg conversion command: {' '.join(cmd)}")
+        logging.info(f"ffmpeg conversion command (auto-rotate): {' '.join(cmd)}")
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300, creationflags=CREATE_NO_WINDOW)
         
         if proc.returncode != 0:
@@ -911,24 +875,64 @@ def convert_hevc_to_h264(input_path, output_path=None, max_attempts=3, failed_di
 
             # Detect rotation metadata BEFORE opening output container
             rotation = _get_video_rotation(input_path)
+            coded_w = input_video_stream.width
+            coded_h = input_video_stream.height
             needs_rotation = rotation in (90, 180, 270) and HAS_PIL
             if rotation in (90, 180, 270) and not HAS_PIL:
                 logging.warning(f"[{conversion_id}] Video has {rotation}° rotation but PIL not available - orientation may be incorrect")
             if needs_rotation:
                 logging.info(f"[{conversion_id}] Video has {rotation}° rotation metadata - will apply during conversion")
 
+            # Safety check: Decode one frame to see if PyAV/FFmpeg has already
+            # auto-rotated the frames (newer FFmpeg builds may do this).  If the
+            # decoded frame dimensions differ from the coded stream dimensions
+            # in a way consistent with the detected rotation, skip manual rotation
+            # to avoid double-rotating.
+            _auto_rotated = False
+            try:
+                _probe_container = av.open(str(input_path))
+                _probe_stream = _probe_container.streams.video[0]
+                for _probe_pkt in _probe_container.demux(_probe_stream):
+                    for _probe_frame in _probe_pkt.decode():
+                        fw, fh = _probe_frame.width, _probe_frame.height
+                        if rotation in (90, 270) and fw == coded_h and fh == coded_w:
+                            # Decoded frame has swapped dimensions → auto-rotation occurred
+                            _auto_rotated = True
+                            logging.info(
+                                f"[{conversion_id}] Auto-rotation detected: coded={coded_w}x{coded_h}, "
+                                f"decoded={fw}x{fh}. Skipping manual rotation to prevent double-rotate."
+                            )
+                        elif rotation == 180 and fw == coded_w and fh == coded_h:
+                            # 180° doesn't swap dimensions; check pixel content isn't feasible,
+                            # so we trust metadata and proceed with manual rotation.
+                            pass
+                        break  # only need first frame
+                    break
+                _probe_container.close()
+            except Exception as probe_err:
+                logging.debug(f"[{conversion_id}] Could not probe for auto-rotation: {probe_err}")
+
+            if _auto_rotated:
+                needs_rotation = False
+                rotation = 0  # Don't swap dims either
+
             logging.info(f"[{conversion_id}] Creating temp output: {temp_output}")
             output_container = av.open(str(temp_output), 'w')
 
             output_video_stream = output_container.add_stream('h264', rate=input_video_stream.average_rate)
             # Swap width/height for 90° or 270° rotation so portrait videos stay portrait
-            if rotation in (90, 270):
-                output_video_stream.width = input_video_stream.height
-                output_video_stream.height = input_video_stream.width
-                logging.info(f"[{conversion_id}] Swapping dimensions: {input_video_stream.width}x{input_video_stream.height} -> {input_video_stream.height}x{input_video_stream.width}")
+            if needs_rotation and rotation in (90, 270):
+                output_video_stream.width = coded_h
+                output_video_stream.height = coded_w
+                logging.info(f"[{conversion_id}] Swapping dimensions: {coded_w}x{coded_h} -> {coded_h}x{coded_w}")
+            elif _auto_rotated:
+                # Auto-rotated: use decoded frame dimensions
+                output_video_stream.width = coded_h
+                output_video_stream.height = coded_w
+                logging.info(f"[{conversion_id}] Using auto-rotated dimensions: {coded_h}x{coded_w}")
             else:
-                output_video_stream.width = input_video_stream.width
-                output_video_stream.height = input_video_stream.height
+                output_video_stream.width = coded_w
+                output_video_stream.height = coded_h
             output_video_stream.pix_fmt = 'yuv420p'
             output_video_stream.bit_rate = input_video_stream.bit_rate or 2000000
 
