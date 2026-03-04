@@ -800,8 +800,8 @@ class SnapchatDownloaderGUI:
         # Timezone preference variable
         self.use_gps_tz = tk.BooleanVar(value=True)  # Use GPS for timezone by default
         
-        # Overlay merge preference
-        self.merge_overlays = tk.BooleanVar(value=True)  # Merge snap overlays by default
+        # Overlay merge preference: "merge" = overlay only, "original" = original only, "both" = save both
+        self.overlay_mode = tk.StringVar(value="merge")
         
         # Configure style
         self.setup_styles()
@@ -875,6 +875,11 @@ class SnapchatDownloaderGUI:
         style.configure("Card.TCheckbutton", background=card_bg, foreground=text_color,
                         font=("Segoe UI", 9))
         style.map("Card.TCheckbutton", background=[("active", card_bg)])
+
+        # Radiobutton style (matches card background)
+        style.configure("Card.TRadiobutton", background=card_bg, foreground=text_color,
+                        font=("Segoe UI", 9))
+        style.map("Card.TRadiobutton", background=[("active", card_bg)])
 
         # Small helper used across widgets for consistent padding
         self._card_padding = 16
@@ -1110,22 +1115,41 @@ class SnapchatDownloaderGUI:
         )
         gps_tz_info.pack(anchor=tk.W, padx=(26, 0), pady=(2, 8))
 
-        # Overlay merge option
+        # Overlay merge option — radio buttons for 3 modes
         overlay_header = ttk.Label(input_card, text="Snap Overlay / Caption", style="Header.TLabel")
         overlay_header.pack(anchor=tk.W, pady=(15, 8))
 
-        overlay_check = ttk.Checkbutton(
+        overlay_rb_merge = ttk.Radiobutton(
             input_card,
-            text="Merge snap overlay / caption onto media",
-            variable=self.merge_overlays,
-            style="Card.TCheckbutton"
+            text="With overlay only — merge captions/stickers onto media",
+            variable=self.overlay_mode,
+            value="merge",
+            style="Card.TRadiobutton"
         )
-        overlay_check.pack(anchor=tk.W, padx=(6, 0))
+        overlay_rb_merge.pack(anchor=tk.W, padx=(6, 0))
+
+        overlay_rb_original = ttk.Radiobutton(
+            input_card,
+            text="Original only — save photo/video without overlay",
+            variable=self.overlay_mode,
+            value="original",
+            style="Card.TRadiobutton"
+        )
+        overlay_rb_original.pack(anchor=tk.W, padx=(6, 0), pady=(4, 0))
+
+        overlay_rb_both = ttk.Radiobutton(
+            input_card,
+            text="Both versions — save original AND overlay in the same folder",
+            variable=self.overlay_mode,
+            value="both",
+            style="Card.TRadiobutton"
+        )
+        overlay_rb_both.pack(anchor=tk.W, padx=(6, 0), pady=(4, 0))
 
         overlay_info = ttk.Label(
             input_card,
-            text="When enabled, Snapchat captions and stickers are merged back onto photos/videos.\n"
-                 "When disabled, only the original photo/video without overlay is saved.",
+            text="Controls how Snapchat captions and stickers are handled.\n"
+                 "'Both versions' saves the clean original and the overlay version side-by-side.",
             style="Info.TLabel"
         )
         overlay_info.pack(anchor=tk.W, padx=(26, 0), pady=(2, 8))
@@ -1690,16 +1714,30 @@ class SnapchatDownloaderGUI:
                     max_retries=max_retries,
                     progress_callback=progress_callback,
                     date_obj=date_obj,
-                    merge_overlay=self.merge_overlays.get()
+                    merge_overlay=self.overlay_mode.get()
                 )
 
                 if download_success:
                     log_local("  ✓ Downloaded")
 
-                    # If merged files were created from ZIP overlay, apply metadata to each
-                    if merged_files:
-                        log_local(f"  ℹ Processing {len(merged_files)} merged file(s) from ZIP overlay")
-                        for merged_file in merged_files:
+                    # Handle "both" mode: dict with merged list + original path
+                    # Handle "merge" mode: list of merged file paths
+                    # Handle "original" mode: None (fall through to single file processing)
+                    both_mode_original = None
+                    overlay_file_list = None
+
+                    if isinstance(merged_files, dict):
+                        # "Both" mode return: {"merged": [...], "original": "path"}
+                        overlay_file_list = merged_files.get("merged", [])
+                        both_mode_original = merged_files.get("original")
+                        log_local(f"  ℹ Both mode: {len(overlay_file_list)} overlay file(s) + original")
+                    elif isinstance(merged_files, list) and merged_files:
+                        # "Merge" mode return: list of merged paths
+                        overlay_file_list = merged_files
+
+                    if overlay_file_list:
+                        log_local(f"  ℹ Processing {len(overlay_file_list)} merged file(s) from ZIP overlay")
+                        for merged_file in overlay_file_list:
                             merged_path = Path(merged_file)
                             log_local(f"  📄 {merged_path.name}")
 
@@ -1744,9 +1782,17 @@ class SnapchatDownloaderGUI:
                                 set_file_timestamps(str(merged_path), date_obj_local)
                                 log_local("    ✓ Set file timestamps")
 
-                        return logs, True, False
+                        # In "both" mode, also process the original file
+                        if both_mode_original and os.path.exists(both_mode_original):
+                            log_local(f"  📄 Processing original (no overlay): {Path(both_mode_original).name}")
+                            # The original was extracted to file_path by the downloader.
+                            # Fall through to single-file metadata processing below
+                            # (don't return early like merge-only mode)
+                        else:
+                            # Merge-only mode: return after overlay processing
+                            return logs, True, False
 
-                    # Set metadata
+                    # Set metadata for single file (original-only download or "both" mode original)
                     if media_type == "Image" and extension.lower() in ['.jpg', '.jpeg']:
                         if HAS_PIEXIF:
                             try:
@@ -1947,6 +1993,15 @@ class SnapchatDownloaderGUI:
                 self.log("🌍 Timezone mode: Using GPS coordinates (falls back to system timezone)")
             else:
                 self.log("🌍 Timezone mode: Using system/fallback timezone")
+            
+            # Log overlay mode
+            overlay_mode = self.overlay_mode.get()
+            overlay_labels = {
+                "merge": "With overlay only",
+                "original": "Original only (no overlay)",
+                "both": "Both versions (original + overlay)"
+            }
+            self.log(f"🖼 Overlay mode: {overlay_labels.get(overlay_mode, overlay_mode)}")
             
             # Process each item
             success_count = 0
