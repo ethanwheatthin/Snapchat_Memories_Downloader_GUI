@@ -6,7 +6,7 @@ from pathlib import Path
 HAS_PIEXIF = False
 _PIEXIF_IMPORT_ERROR = None
 try:
-    from PIL import Image
+    from PIL import Image, ImageOps
     import piexif
     HAS_PIEXIF = True
 except Exception as e:
@@ -63,6 +63,11 @@ def set_image_exif_metadata(file_path, date_obj, latitude, longitude, timezone_o
         exif_dict["Exif"][piexif.ExifIFD.DateTimeDigitized] = date_str
         exif_dict["0th"][piexif.ImageIFD.DateTime] = date_str
         
+        # Normalize orientation: we apply exif_transpose below when saving,
+        # so the pixel data will be in correct display orientation.
+        # Set Orientation=1 (normal) to prevent viewers from rotating again.
+        exif_dict["0th"][piexif.ImageIFD.Orientation] = 1
+        
         # Add timezone offset tags (EXIF 2.31 standard)
         if timezone_offset:
             offset_bytes = timezone_offset.encode('ascii')
@@ -91,6 +96,9 @@ def set_image_exif_metadata(file_path, date_obj, latitude, longitude, timezone_o
 
         try:
             img = Image.open(file_path)
+            # Apply EXIF orientation to pixel data so the saved image is
+            # in correct display orientation regardless of viewer support.
+            img = ImageOps.exif_transpose(img) or img
             img.save(str(temp_path), "JPEG", exif=exif_bytes, quality=95)
             img.close()
             # atomic replace (works across OS where os.replace is supported)

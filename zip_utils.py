@@ -15,7 +15,7 @@ CREATE_NO_WINDOW = 0x08000000 if sys.platform == 'win32' else 0
 # Pillow detection
 HAS_PIL = False
 try:
-    from PIL import Image as PILImage
+    from PIL import Image as PILImage, ImageOps as PILImageOps
     HAS_PIL = True
 except Exception:
     HAS_PIL = False
@@ -54,14 +54,82 @@ def extract_media_from_zip(zip_path, output_path):
                 logging.debug(f"Could not clean up temp directory: {cleanup_error}")
 
 
+def extract_original_from_zip(zip_path, output_path):
+    """Extract the original (-main) media file from a ZIP, ignoring overlay files.
+
+    When a ZIP contains -main/-overlay pairs, this extracts only the -main file
+    (the original photo/video without overlay). Used in 'both' mode to save the
+    unmodified version alongside the merged overlay version.
+
+    Args:
+        zip_path: Path to the ZIP file
+        output_path: Path to save the extracted original media
+
+    Returns:
+        True on success, False on failure.
+    """
+    temp_dir = None
+    try:
+        logging.info(f"Extracting original (-main) media from ZIP: {zip_path}")
+        main_pattern = re.compile(r'-main\.[^.]+$', re.IGNORECASE)
+        media_extensions = ('.jpg', '.jpeg', '.png', '.mp4', '.mov', '.m4v', '.heic')
+
+        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+            file_list = [n for n in zip_ref.namelist() if not n.endswith('/')]
+
+            # Prefer -main files (the original without overlay)
+            main_files = [f for f in file_list if main_pattern.search(f)
+                          and f.lower().endswith(media_extensions)]
+            if main_files:
+                media_file = main_files[0]
+            else:
+                # Fallback: first non-overlay media file
+                overlay_pattern = re.compile(r'-overlay\.[^.]+$', re.IGNORECASE)
+                media_files = [f for f in file_list
+                               if f.lower().endswith(media_extensions)
+                               and not overlay_pattern.search(f)]
+                if not media_files:
+                    logging.warning("No original media files found in ZIP archive")
+                    return False
+                media_file = media_files[0]
+
+            logging.info(f"Extracting original: {media_file}")
+            temp_dir = Path(output_path).parent / "temp_extract_original"
+            temp_dir.mkdir(exist_ok=True)
+            extracted_path = zip_ref.extract(media_file, temp_dir)
+            shutil.move(extracted_path, output_path)
+            logging.info(f"Successfully extracted original media to: {output_path}")
+            return True
+
+    except zipfile.BadZipFile as e:
+        logging.warning(f"Invalid ZIP file: {zip_path} - {e}")
+        return False
+    except Exception as e:
+        logging.warning(f"Error extracting original from ZIP: {e}")
+        return False
+    finally:
+        if temp_dir and temp_dir.exists():
+            try:
+                shutil.rmtree(temp_dir)
+            except Exception as cleanup_error:
+                logging.debug(f"Could not clean up temp directory: {cleanup_error}")
+
+
 def merge_images(main_img_path, overlay_img_path, output_path):
     if not HAS_PIL:
         logging.error("Pillow is not installed; cannot merge images")
         return False, "Pillow not installed"
 
     try:
-        main = PILImage.open(main_img_path).convert('RGBA')
-        overlay = PILImage.open(overlay_img_path).convert('RGBA')
+        # Apply EXIF orientation before compositing so both images
+        # are in correct display orientation (prevents landscape/portrait mismatch)
+        main_raw = PILImage.open(main_img_path)
+        main_raw = PILImageOps.exif_transpose(main_raw) or main_raw
+        main = main_raw.convert('RGBA')
+
+        overlay_raw = PILImage.open(overlay_img_path)
+        overlay_raw = PILImageOps.exif_transpose(overlay_raw) or overlay_raw
+        overlay = overlay_raw.convert('RGBA')
 
         if overlay.size != main.size:
             overlay = overlay.resize(main.size, PILImage.LANCZOS)

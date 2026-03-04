@@ -22,6 +22,17 @@ def _get_thread_id():
 
 def download_media(url, output_path, max_retries=3, progress_callback=None, date_obj=None, merge_overlay=True):
     last_error = None
+
+    # Normalize merge_overlay to string mode for consistent handling
+    # Supports: True/"merge", False/"original", "both"
+    if merge_overlay is True or merge_overlay == "merge":
+        merge_mode = "merge"
+    elif merge_overlay is False or merge_overlay == "original":
+        merge_mode = "original"
+    elif merge_overlay == "both":
+        merge_mode = "both"
+    else:
+        merge_mode = "merge"  # Safe default
     
     # Create thread-safe temporary file path
     output_path = Path(output_path)
@@ -103,16 +114,34 @@ def download_media(url, output_path, max_retries=3, progress_callback=None, date
                     if progress_callback:
                         progress_callback("Downloaded ZIP archive, processing...")
                     
-                    # Only attempt overlay merge if user has enabled it
-                    if merge_overlay:
+                    # Only attempt overlay merge if user wants merged or both versions
+                    if merge_mode in ("merge", "both"):
                         merged = zip_utils.process_zip_overlay(write_path, str(Path(output_path).parent), date_obj)
                         if merged:
-                            try:
-                                os.remove(write_path)
-                            except Exception:
-                                pass
-                            logging.info(f"Created merged images: {merged}")
-                            return (True, merged)
+                            if merge_mode == "both":
+                                # "Both" mode: also extract the original (no overlay) version
+                                logging.info("Both mode: extracting original media alongside merged overlay")
+                                original_extracted = zip_utils.extract_original_from_zip(
+                                    write_path, str(output_path)
+                                )
+                                try:
+                                    os.remove(write_path)
+                                except Exception:
+                                    pass
+                                if original_extracted:
+                                    logging.info(f"Both mode: merged={merged}, original={output_path}")
+                                    return (True, {"merged": merged, "original": str(output_path)})
+                                else:
+                                    logging.warning("Both mode: could not extract original, returning merged only")
+                                    return (True, merged)
+                            else:
+                                # Merge-only mode (existing behavior)
+                                try:
+                                    os.remove(write_path)
+                                except Exception:
+                                    pass
+                                logging.info(f"Created merged images: {merged}")
+                                return (True, merged)
                     else:
                         logging.info("Overlay merge disabled by user, extracting original media only")
 
