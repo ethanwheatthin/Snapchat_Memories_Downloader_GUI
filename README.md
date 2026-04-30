@@ -37,6 +37,7 @@ This tool downloads all your Snapchat memories using the `memories_history.json`
 - **File Timestamps** — Sets file modification dates to match memory creation dates
 - **Progress Tracking** — Real-time progress updates and detailed logging
 - **Stop/Resume** — Pause and resume downloads at any time
+- **Process Local Files** — Apply metadata to already-downloaded memories when Snapchat export does not include download URLs
 
 ## 🚀 Getting Started
 
@@ -139,6 +140,30 @@ python download_snapchat_memories_gui.py
    - Files are saved in your output directory
    - Named by creation date: `YYYYMMDD_HHMMSS.jpg` or `YYYYMMDD_HHMMSS.mp4`
    - Overlays are automatically merged when detected
+
+## 📂 Processing Local Files (No Download URLs)
+
+Some Snapchat data exports do not include download URLs in `memories_history.json`, the `Media Download Url` field is empty for every entry. This has been confirmed across multiple accounts; it does not appear to be a one-off issue. If this happened to you, the standard download mode will skip all files and there is no workaround through the app, the URLs simply are not there.
+
+The only option in this case is to download the media files manually from your Snapchat account before your export links expire, which is tedious since Snapchat splits large libraries across many export ZIPs (sometimes 50+ files) that must each be downloaded and extracted one by one.
+
+Once you have the files, Snapchat still includes the actual media inside the `memories/` subfolder of each export ZIP, so the metadata (dates, GPS coordinates, overlay merging) can still be applied. This mode does exactly that.
+
+### How to use
+
+1. Extract your Snapchat export ZIP(s) as normal
+2. At the top of the app, switch the **Mode** to **Process Local Files**
+3. **JSON File** — select your `memories_history.json` as usual
+4. **Memories Folder** — select one of the following:
+   - The `memories/` folder from a single export (e.g. `mydata~XXX/memories/`)
+   - The parent export folder (e.g. `mydata~XXX/`) — the app will find `memories/` automatically
+   - A folder containing multiple exports (e.g. `snapchat/`), the app discovers all `mydata~*/memories/` subfolders and processes them in bulk
+5. **Output Directory** — choose where to save the processed files
+6. Click **Process Local Files**
+
+The app matches each local file to its JSON entry using the file's modification timestamp, which Snapchat preserves in the export. Correct dates, GPS coordinates, and timezone information are then embedded into each output file.
+
+> **Note:** If you have multiple export ZIPs (Snapchat splits large exports across several files), place all extracted folders inside one parent directory and point the app at that parent. It will process all of them in a single run.
 
 ## 🔧 Technical Details
 

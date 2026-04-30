@@ -1,7 +1,7 @@
 import json
 import os
 import requests
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import platform
 import subprocess
@@ -802,6 +802,11 @@ class SnapchatDownloaderGUI:
         
         # Overlay merge preference: "merge" = overlay only, "original" = original only, "both" = save both
         self.overlay_mode = tk.StringVar(value="merge")
+
+        # Mode: "download" = normal download from URLs, "local" = process already-downloaded local files
+        self.mode = tk.StringVar(value="download")
+        self.memories_path = tk.StringVar()
+        self.is_local_mode = False  # Tracks which mode is active during processing
         
         # Configure style
         self.setup_styles()
@@ -917,6 +922,46 @@ class SnapchatDownloaderGUI:
         input_card = ttk.Frame(main_frame, style="Card.TFrame", padding=20)
         input_card.pack(fill=tk.X, pady=(0, 20))
         
+        # Mode selector
+        mode_header = ttk.Label(input_card, text="Mode", style="Header.TLabel")
+        mode_header.pack(anchor=tk.W, pady=(0, 8))
+
+        mode_frame = ttk.Frame(input_card, style="Card.TFrame")
+        mode_frame.pack(fill=tk.X, pady=(0, 4))
+
+        mode_rb_download = ttk.Radiobutton(
+            mode_frame,
+            text="Download from Snapchat  —  fetch via memories_history.json URLs",
+            variable=self.mode,
+            value="download",
+            style="Card.TRadiobutton",
+            command=self._on_mode_change,
+        )
+        mode_rb_download.pack(anchor=tk.W)
+
+        mode_rb_local = ttk.Radiobutton(
+            mode_frame,
+            text="Process Local Files  —  apply metadata to already-downloaded memories",
+            variable=self.mode,
+            value="local",
+            style="Card.TRadiobutton",
+            command=self._on_mode_change,
+        )
+        mode_rb_local.pack(anchor=tk.W, pady=(4, 0))
+
+        mode_info = ttk.Label(
+            input_card,
+            text="Use 'Process Local Files' when Snapchat didn't include download URLs in your export "
+                 "but you have the actual media files in the memories/ folder.",
+            style="Info.TLabel",
+            wraplength=520,
+            justify=tk.LEFT,
+        )
+        mode_info.pack(anchor=tk.W, pady=(2, 15))
+        input_card.bind("<Configure>", lambda e: mode_info.config(wraplength=max(e.width - 12, 200)))
+
+        ttk.Separator(input_card, orient="horizontal").pack(fill=tk.X, pady=(0, 15))
+
         # JSON file selection
         json_label = ttk.Label(input_card, text="JSON File", style="Header.TLabel")
         json_label.pack(anchor=tk.W, pady=(0, 8))
@@ -932,11 +977,30 @@ class SnapchatDownloaderGUI:
                              command=self.browse_json, style="Secondary.TButton")
         json_btn.pack(side=tk.LEFT)
         
-        json_info = ttk.Label(input_card, 
-                             text="Select your memories_history.json file from Snapchat export", 
+        json_info = ttk.Label(input_card,
+                             text="Select your memories_history.json file from Snapchat export",
                              style="Info.TLabel")
         json_info.pack(anchor=tk.W, pady=(0, 15))
-        
+
+        # Memories folder (local mode only — hidden by default)
+        self.memories_section_label = ttk.Label(input_card, text="Memories Folder", style="Header.TLabel")
+        self.memories_section_frame = ttk.Frame(input_card, style="Card.TFrame")
+
+        memories_entry = ttk.Entry(self.memories_section_frame, textvariable=self.memories_path,
+                                   font=("Segoe UI", 9), width=50)
+        memories_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 10))
+
+        memories_btn = ttk.Button(self.memories_section_frame, text="Browse...",
+                                  command=self.browse_memories, style="Secondary.TButton")
+        memories_btn.pack(side=tk.LEFT)
+
+        self.memories_section_info = ttk.Label(
+            input_card,
+            text="Select the memories/ folder OR a parent directory (e.g. snapchat/) to process all exports in bulk",
+            style="Info.TLabel",
+        )
+        # hidden by default; revealed by _on_mode_change
+
         # Output directory selection
         output_label = ttk.Label(input_card, text="Output Directory", style="Header.TLabel")
         output_label.pack(anchor=tk.W, pady=(0, 8))
@@ -1023,25 +1087,29 @@ class SnapchatDownloaderGUI:
                              command=lambda: webbrowser.open("https://www.videolan.org/vlc/"))
         vlc_btn.pack(side=tk.LEFT)
         
-        # Download retries option
+        # Download retries option  (hidden in local mode)
         retries_frame = ttk.Frame(input_card, style="Card.TFrame")
+        self._download_only_widgets = []  # populated below
         retries_frame.pack(fill=tk.X, pady=(8, 12))
-        
+        self._download_only_widgets.append((retries_frame, {"fill": tk.X, "pady": (8, 12)}))
+
         retries_label = ttk.Label(retries_frame, text="Download Retries:", style="Header.TLabel")
         retries_label.pack(side=tk.LEFT)
-        
+
         # Use a Spinbox for retry count
         retries_spin = tk.Spinbox(retries_frame, from_=1, to=10, width=5, textvariable=self.max_retries)
         retries_spin.pack(side=tk.LEFT, padx=(8, 0))
-        
+
         retries_info = ttk.Label(input_card,
                                  text="Number of download attempts (initial try + retries)",
                                  style="Info.TLabel")
         retries_info.pack(anchor=tk.W, pady=(6, 10))
+        self._download_only_widgets.append((retries_info, {"anchor": tk.W, "pady": (6, 10)}))
 
         # Download threads option
         threads_frame = ttk.Frame(input_card, style="Card.TFrame")
         threads_frame.pack(fill=tk.X, pady=(0, 12))
+        self._download_only_widgets.append((threads_frame, {"fill": tk.X, "pady": (0, 12)}))
 
         threads_label = ttk.Label(threads_frame, text="Multi-Download Count:", style="Header.TLabel")
         threads_label.pack(side=tk.LEFT)
@@ -1053,10 +1121,12 @@ class SnapchatDownloaderGUI:
                                  text="Number of concurrent downloads (higher uses more bandwidth/CPU)",
                                  style="Info.TLabel")
         threads_info.pack(anchor=tk.W, pady=(6, 10))
+        self._download_only_widgets.append((threads_info, {"anchor": tk.W, "pady": (6, 10)}))
 
         # Resume Options Section
         resume_header = ttk.Label(input_card, text="Resume Options", style="Header.TLabel")
         resume_header.pack(anchor=tk.W, pady=(15, 8))
+        self._download_only_widgets.append((resume_header, {"anchor": tk.W, "pady": (15, 8)}))
         
         # Skip existing files checkbox
         self.skip_existing = tk.BooleanVar(value=False)
@@ -1068,14 +1138,16 @@ class SnapchatDownloaderGUI:
             command=self._toggle_reconvert_visibility
         )
         skip_check.pack(anchor=tk.W, padx=(6, 0))
-        
+        self._download_only_widgets.append((skip_check, {"anchor": tk.W, "padx": (6, 0)}))
+
         skip_info = ttk.Label(
             input_card,
             text="Validates local files before downloading. Useful for resuming interrupted sessions or adding new memories.",
             style="Info.TLabel"
         )
         skip_info.pack(anchor=tk.W, padx=(26, 0), pady=(2, 8))
-        
+        self._download_only_widgets.append((skip_info, {"anchor": tk.W, "padx": (26, 0), "pady": (2, 8)}))
+
         # Re-convert videos checkbox (hidden by default, shown when skip_existing is ON)
         self.reconvert_frame = ttk.Frame(input_card, style="Card.TFrame")
         # Don't pack yet - will be shown/hidden by _toggle_reconvert_visibility
@@ -1164,14 +1236,14 @@ class SnapchatDownloaderGUI:
         # Buttons
         button_frame = ttk.Frame(input_card, style="Card.TFrame")
         button_frame.pack(fill=tk.X)
-        
-        self.download_btn = ttk.Button(button_frame, text="Start Download", 
-                                      command=self.start_download, 
-                                      style="Primary.TButton")
+
+        self.download_btn = ttk.Button(button_frame, text="Start Download",
+                                       command=self.start_download,
+                                       style="Primary.TButton")
         self.download_btn.pack(side=tk.LEFT, padx=(0, 10))
-        
-        self.stop_btn = ttk.Button(button_frame, text="⏹ Stop", 
-                                   command=self.stop_download_func, 
+
+        self.stop_btn = ttk.Button(button_frame, text="⏹ Stop",
+                                   command=self.stop_download_func,
                                    style="Stop.TButton", state=tk.DISABLED)
         self.stop_btn.pack(side=tk.LEFT, padx=(0, 10))
         
@@ -1229,6 +1301,54 @@ class SnapchatDownloaderGUI:
             self.reconvert_frame.pack_forget()
             self.reconvert_videos.set(False)  # Reset when hidden
     
+    def _on_mode_change(self):
+        """Show/hide sections depending on download vs. local-files mode."""
+        if self.mode.get() == "local":
+            # Show memories folder
+            self.memories_section_label.pack(anchor=tk.W, pady=(0, 8))
+            self.memories_section_frame.pack(fill=tk.X, pady=(0, 8))
+            self.memories_section_info.pack(anchor=tk.W, pady=(0, 15))
+            # Hide download-only sections
+            for widget, _ in self._download_only_widgets:
+                widget.pack_forget()
+            # Update button label
+            self.download_btn.config(text="Process Local Files")
+        else:
+            # Hide memories folder
+            self.memories_section_label.pack_forget()
+            self.memories_section_frame.pack_forget()
+            self.memories_section_info.pack_forget()
+            # Restore download-only sections
+            for widget, pack_opts in self._download_only_widgets:
+                widget.pack(**pack_opts)
+            # Update button label
+            self.download_btn.config(text="Start Download")
+
+    def browse_memories(self):
+        """Open directory dialog to select a memories/ folder or parent directory."""
+        directory = filedialog.askdirectory(
+            title="Select memories/ folder or parent directory (e.g. snapchat/)"
+        )
+        if not directory:
+            return
+        self.memories_path.set(directory)
+        # Give immediate feedback about what was found
+        folders = find_memories_folders(directory)
+        if not folders:
+            self.memories_section_info.config(
+                text="⚠ No memories files found — select the memories/ folder or its parent"
+            )
+        elif len(folders) == 1:
+            count = len([f for f in os.listdir(folders[0]) if "-main" in f])
+            self.memories_section_info.config(
+                text=f"✓ 1 memories folder found — {count:,} files ready to process"
+            )
+        else:
+            total = sum(len([f for f in os.listdir(d) if "-main" in f]) for d in folders)
+            self.memories_section_info.config(
+                text=f"✓ {len(folders)} memories folders found — {total:,} total files ready to process"
+            )
+
     def browse_json(self):
         """Open file dialog to select JSON file."""
         filename = filedialog.askopenfilename(
@@ -1316,51 +1436,71 @@ class SnapchatDownloaderGUI:
         self.progress_bar['value'] = progress
         if is_resume_mode:
             self.status_label.config(text=f"🔍 Validating {current} of {total}...", foreground="#00d2d3")
+        elif self.is_local_mode:
+            self.status_label.config(text=f"⚙ Processing {current} of {total}...", foreground="#00d2d3")
         else:
             self.status_label.config(text=f"⬇ Downloading {current} of {total}...", foreground="#00d2d3")
         self.root.update_idletasks()
     
     def start_download(self):
-        """Start the download process."""
+        """Start the download or local-processing process."""
         if self.is_downloading:
             return
-        
+
         json_file = self.json_path.get()
         output_dir = self.output_path.get()
-        
+
         if not json_file:
             messagebox.showerror("Error", "Please select a JSON file")
             return
-        
+
         if not os.path.exists(json_file):
             messagebox.showerror("Error", f"JSON file not found: {json_file}")
             return
-        
+
         if not output_dir:
             messagebox.showerror("Error", "Please select an output directory")
             return
-        
+
+        # Local-files mode extra validation
+        if self.mode.get() == "local":
+            memories_dir = self.memories_path.get()
+            if not memories_dir:
+                messagebox.showerror("Error", "Please select the memories/ folder")
+                return
+            if not os.path.isdir(memories_dir):
+                messagebox.showerror("Error", f"Memories folder not found: {memories_dir}")
+                return
+
         # Clear log
         self.log_text.delete(1.0, tk.END)
-        
-        # Update UI state with visual feedback
+
+        # Update UI state
         self.is_downloading = True
         self.stop_download = False
-        
-        # Show appropriate button text based on mode
-        if self.skip_existing.get():
-            self.download_btn.config(state=tk.DISABLED, text="🔍 Validating...")
-            self.status_label.config(text="🔍 Validating existing files...", foreground="#00d2d3")
+
+        if self.mode.get() == "local":
+            self.is_local_mode = True
+            self.download_btn.config(state=tk.DISABLED, text="⚙ Processing...")
+            self.status_label.config(text="🔄 Starting local processing...", foreground="#00d2d3")
+            self.stop_btn.config(state=tk.NORMAL)
+            self.progress_bar['value'] = 0
+            thread = threading.Thread(
+                target=self.process_local_files_thread,
+                args=(json_file, self.memories_path.get(), output_dir),
+            )
         else:
-            self.download_btn.config(state=tk.DISABLED, text="⏳ Downloading...")
-            self.status_label.config(text="🔄 Starting download...", foreground="#00d2d3")
-        
-        self.stop_btn.config(state=tk.NORMAL)
-        self.progress_bar['value'] = 0
-        
-        # Start download in separate thread
-        thread = threading.Thread(target=self.download_thread, 
-                                 args=(json_file, output_dir))
+            self.is_local_mode = False
+            if self.skip_existing.get():
+                self.download_btn.config(state=tk.DISABLED, text="🔍 Validating...")
+                self.status_label.config(text="🔍 Validating existing files...", foreground="#00d2d3")
+            else:
+                self.download_btn.config(state=tk.DISABLED, text="⏳ Downloading...")
+                self.status_label.config(text="🔄 Starting download...", foreground="#00d2d3")
+            self.stop_btn.config(state=tk.NORMAL)
+            self.progress_bar['value'] = 0
+            thread = threading.Thread(target=self.download_thread, args=(json_file, output_dir))
+
         thread.daemon = True
         thread.start()
     
@@ -2165,14 +2305,21 @@ class SnapchatDownloaderGUI:
             self.download_complete()
     
     def download_complete(self):
-        """Reset UI after download completes."""
+        """Reset UI after download or local-processing completes."""
         self.is_downloading = False
-        self.download_btn.config(state=tk.NORMAL, text="Start Download")
-        self.stop_btn.config(state=tk.DISABLED, text="⏹ Stop")
-        if self.stop_download:
-            self.status_label.config(text="⚠ Download stopped", foreground="#f39c12")
+        if self.is_local_mode:
+            self.download_btn.config(state=tk.NORMAL, text="Process Local Files")
+            if self.stop_download:
+                self.status_label.config(text="⚠ Processing stopped", foreground="#f39c12")
+            else:
+                self.status_label.config(text="✅ Processing complete", foreground="#27ae60")
         else:
-            self.status_label.config(text="✅ Download complete", foreground="#27ae60")
+            self.download_btn.config(state=tk.NORMAL, text="Start Download")
+            if self.stop_download:
+                self.status_label.config(text="⚠ Download stopped", foreground="#f39c12")
+            else:
+                self.status_label.config(text="✅ Download complete", foreground="#27ae60")
+        self.stop_btn.config(state=tk.DISABLED, text="⏹ Stop")
     
     def cleanup_ffmpeg_processes(self):
         """Kill any orphaned ffmpeg processes."""
@@ -2195,14 +2342,353 @@ class SnapchatDownloaderGUI:
         """Handle application close event."""
         # Clean up any orphaned ffmpeg processes
         self.cleanup_ffmpeg_processes()
-        
+
         # Stop any ongoing downloads
         if self.is_downloading:
             self.stop_download = True
             logging.info("Download stopped due to application close")
-        
+
         # Destroy the window
         self.root.destroy()
+
+    def _detect_tz_offset(self, main_files, memories_dir, json_items):
+        """Infer the UTC offset Snapchat used when writing file mtimes."""
+        json_by_day = {}
+        for item in json_items:
+            try:
+                dt = datetime.strptime(item["Date"], "%Y-%m-%d %H:%M:%S UTC")
+                day = item["Date"][:10]
+                json_by_day.setdefault(day, []).append(dt.timestamp())
+            except Exception:
+                pass
+
+        for fname in main_files[:20]:
+            day = fname[:10]
+            if day not in json_by_day:
+                continue
+            mtime = os.path.getmtime(os.path.join(memories_dir, fname))
+            for offset_min in range(-14 * 60, 14 * 60 + 1, 15):
+                utc_candidate = mtime + offset_min * 60
+                for json_ts in json_by_day[day]:
+                    if abs(utc_candidate - json_ts) <= 3:
+                        return timedelta(minutes=offset_min)
+
+        return timedelta(0)  # fallback: assume UTC
+
+    def process_local_files_thread(self, json_file, memories_root, output_dir):
+        """Apply JSON metadata to already-downloaded local memory files."""
+        try:
+            output_path = Path(output_dir)
+            output_path.mkdir(exist_ok=True)
+
+            self.log(f"Loading JSON: {json_file}")
+            with open(json_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            json_items = data.get("Saved Media", [])
+            self.log(f"JSON contains {len(json_items):,} total entries")
+
+            memories_folders = find_memories_folders(memories_root)
+            if not memories_folders:
+                self.log(f"⚠ No memories folders found under: {memories_root}")
+                self.download_complete()
+                return
+
+            self.log(f"Found {len(memories_folders)} memories folder(s):")
+            for mdir in memories_folders:
+                cnt = len([f for f in os.listdir(mdir) if "-main" in f])
+                self.log(f"  • {mdir}  ({cnt:,} files)")
+            self.log("")
+
+            json_by_ts = {}
+            for item in json_items:
+                try:
+                    dt = datetime.strptime(item["Date"], "%Y-%m-%d %H:%M:%S UTC")
+                    ts = int(dt.timestamp())
+                    json_by_ts[ts] = item
+                except Exception:
+                    pass
+
+            overlay_mode = self.overlay_mode.get()
+            overlay_labels = {"merge": "With overlay only", "original": "Original only", "both": "Both versions"}
+            self.log(f"🖼 Overlay mode: {overlay_labels.get(overlay_mode, overlay_mode)}")
+            self.log("🌍 Timezone: GPS-based (fallback to system)" if self.use_gps_tz.get()
+                     else "🌍 Timezone: System timezone")
+            self.log("")
+
+            all_folder_files = []
+            for mdir in memories_folders:
+                files = sorted([f for f in os.listdir(mdir) if "-main" in f])
+                all_folder_files.append((mdir, files))
+            grand_total = sum(len(files) for _, files in all_folder_files)
+
+            if grand_total == 0:
+                self.log("⚠ No -main files found in any discovered folder")
+                self.download_complete()
+                return
+
+            self.log("Detecting timezone offset from file timestamps…")
+            tz_offset = timedelta(0)
+            for mdir, files in all_folder_files:
+                if files:
+                    off = self._detect_tz_offset(files, mdir, json_items)
+                    if off.total_seconds() != 0:
+                        tz_offset = off
+                        break
+            tz_hours = tz_offset.total_seconds() / 3600
+            self.log(f"UTC offset: {'+' if tz_hours >= 0 else ''}{tz_hours:.2f}h\n")
+
+            global_idx = 0
+            total_success = 0
+            total_error = 0
+            total_matched = 0
+            multi = len(memories_folders) > 1
+
+            for folder_num, (memories_dir, main_files) in enumerate(all_folder_files, 1):
+                if self.stop_download:
+                    break
+
+                if multi:
+                    label = os.path.basename(os.path.dirname(memories_dir))
+                    self.log(f"━━━ [{folder_num}/{len(memories_folders)}] {label} "
+                             f"({len(main_files):,} files) ━━━")
+
+                dir_files = os.listdir(memories_dir)
+                overlay_map = {}
+                for fname in dir_files:
+                    if "-overlay" in fname:
+                        base = re.sub(r"-overlay\.[^.]+$", "", fname)
+                        overlay_map[base] = fname
+
+                folder_success = 0
+                folder_matched = 0
+
+                for fname in main_files:
+                    if self.stop_download:
+                        self.log("\n⚠ Stopped by user")
+                        break
+
+                    global_idx += 1
+                    file_path = os.path.join(memories_dir, fname)
+
+                    base = re.sub(r"-main\.[^.]+$", "", fname)
+                    overlay_fname = overlay_map.get(base)
+                    overlay_path = os.path.join(memories_dir, overlay_fname) if overlay_fname else None
+
+                    mtime = os.path.getmtime(file_path)
+                    utc_ts = int(mtime + tz_offset.total_seconds())
+                    json_entry = None
+                    for delta in range(-3, 4):
+                        candidate = json_by_ts.get(utc_ts + delta)
+                        if candidate is not None:
+                            json_entry = candidate
+                            break
+
+                    if json_entry:
+                        total_matched += 1
+                        folder_matched += 1
+
+                    utc_mtime = datetime.utcfromtimestamp(mtime + tz_offset.total_seconds())
+
+                    logs, success, error = self._process_local_file(
+                        global_idx, grand_total, fname, file_path, overlay_path,
+                        json_entry, utc_mtime, output_path,
+                    )
+
+                    for line in logs:
+                        self.log(line)
+
+                    if success:
+                        total_success += 1
+                        folder_success += 1
+                    if error:
+                        total_error += 1
+
+                    self.update_progress(global_idx, grand_total, is_resume_mode=False)
+                    self.log("")
+
+                if multi:
+                    self.log(f"  ✓ Folder done: {folder_success}/{len(main_files)} "
+                             f"processed, {folder_matched}/{len(main_files)} matched\n")
+
+            self.log("=" * 50)
+            self.log("Processing Complete!")
+            if multi:
+                self.log(f"Folders:          {len(memories_folders)}")
+            self.log(f"Files processed:  {total_success} / {grand_total}")
+            self.log(f"Metadata matched: {total_matched} / {grand_total}")
+            self.log(f"Failed:           {total_error}")
+            self.log(f"Output:           {output_dir}")
+            self.log("=" * 50)
+
+            if not self.stop_download:
+                messagebox.showinfo(
+                    "Complete",
+                    (f"{len(memories_folders)} folders\n" if multi else "")
+                    + f"Processed {total_success} of {grand_total} files\n"
+                    + f"Metadata matched: {total_matched}\n"
+                    + f"Failed: {total_error}\n"
+                    + f"Output: {output_dir}",
+                )
+
+        except Exception as exc:
+            self.log(f"\n✗ Error: {exc}")
+            logging.error("process_local_files_thread error", exc_info=True)
+            messagebox.showerror("Error", f"An error occurred:\n{exc}")
+        finally:
+            self.download_complete()
+
+    def _process_local_file(self, idx, total, fname, file_path, overlay_path,
+                             json_entry, utc_mtime, output_path):
+        """Copy one memory file to output_path with metadata applied."""
+        logs = [f"[{idx}/{total}] {fname}"]
+
+        def log_local(msg):
+            logs.append(msg)
+
+        try:
+            ext = os.path.splitext(fname)[1].lower()
+            is_video = ext in (".mp4", ".mov", ".m4v", ".avi", ".mkv")
+
+            if json_entry:
+                try:
+                    date_obj_utc = parse_date(json_entry["Date"])
+                except Exception:
+                    date_obj_utc = utc_mtime.replace(tzinfo=timezone.utc)
+                latitude, longitude = parse_location(json_entry.get("Location", ""))
+                log_local(f"  ✓ JSON match: {json_entry['Date']}")
+                if latitude is not None:
+                    log_local(f"  📍 {latitude:.5f}, {longitude:.5f}")
+                else:
+                    log_local("  📍 No GPS in JSON entry")
+            else:
+                date_obj_utc = utc_mtime.replace(tzinfo=timezone.utc)
+                latitude, longitude = None, None
+                log_local(f"  ⚠ No JSON match — using file timestamp: "
+                          f"{utc_mtime.strftime('%Y-%m-%d %H:%M:%S')} UTC")
+
+            try:
+                force_sys = not self.use_gps_tz.get()
+                local_dt, tz_name, tz_off_str = snap_utils.convert_to_local_timezone(
+                    date_obj_utc, latitude, longitude, force_system_tz=force_sys
+                )
+                log_local(f"  🌍 {tz_name} ({tz_off_str})")
+            except Exception:
+                local_dt = date_obj_utc
+                tz_off_str = "+00:00"
+
+            date_str = local_dt.strftime("%Y%m%d_%H%M%S")
+            overlay_mode = self.overlay_mode.get()
+
+            has_overlay = overlay_path and os.path.exists(overlay_path)
+
+            if has_overlay and overlay_mode in ("merge", "both"):
+                out_name = f"{date_str}_{idx}{ext}"
+                out_file = str(output_path / out_name)
+
+                if is_video:
+                    ok, result = merge_video_overlay(file_path, overlay_path, out_file)
+                else:
+                    ok, result = merge_images(file_path, overlay_path, out_file)
+
+                if ok:
+                    log_local(f"  ✓ Merged overlay → {out_name}")
+                    _apply_file_metadata(result, is_video, local_dt, latitude, longitude,
+                                        tz_off_str, log_local)
+                else:
+                    log_local(f"  ⚠ Merge failed ({result}), copying original instead")
+                    out_file = str(output_path / out_name)
+                    _copy_file_with_metadata(file_path, out_file, is_video, local_dt,
+                                             latitude, longitude, tz_off_str, log_local)
+
+                if overlay_mode == "both":
+                    orig_name = f"{date_str}_{idx}_original{ext}"
+                    orig_out = str(output_path / orig_name)
+                    _copy_file_with_metadata(file_path, orig_out, is_video, local_dt,
+                                             latitude, longitude, tz_off_str, log_local)
+                    log_local(f"  ✓ Saved original → {orig_name}")
+
+            else:
+                out_name = f"{date_str}_{idx}{ext}"
+                out_file = str(output_path / out_name)
+                _copy_file_with_metadata(file_path, out_file, is_video, local_dt,
+                                         latitude, longitude, tz_off_str, log_local)
+                log_local(f"  ✓ → {out_name}")
+
+            return logs, True, False
+
+        except Exception as exc:
+            logs.append(f"  ✗ Error: {exc}")
+            logging.error(f"_process_local_file {fname}: {exc}", exc_info=True)
+            return logs, False, True
+
+def find_memories_folders(root_dir):
+    """Return all memories/ folders found at or under root_dir."""
+    try:
+        entries = os.listdir(root_dir)
+    except Exception:
+        return []
+
+    if any("-main" in f for f in entries):
+        return [root_dir]
+
+    direct_mem = os.path.join(root_dir, "memories")
+    if os.path.isdir(direct_mem):
+        try:
+            if any("-main" in f for f in os.listdir(direct_mem)):
+                return [direct_mem]
+        except Exception:
+            pass
+
+    found = []
+    for item in sorted(entries):
+        item_path = os.path.join(root_dir, item)
+        if not os.path.isdir(item_path):
+            continue
+        mem_path = os.path.join(item_path, "memories")
+        if os.path.isdir(mem_path):
+            try:
+                if any("-main" in f for f in os.listdir(mem_path)):
+                    found.append(mem_path)
+            except Exception:
+                pass
+    return found
+
+
+def _apply_file_metadata(path, is_video, date_obj, lat, lon, tz_offset, log_fn):
+    """Write EXIF / MP4 metadata and set file timestamps."""
+    ext = os.path.splitext(path)[1].lower()
+    if is_video:
+        meta_set = False
+        try:
+            if set_video_metadata_ffmpeg(path, date_obj, lat, lon, tz_offset):
+                log_fn("    ✓ Video metadata (ffmpeg)")
+                meta_set = True
+        except Exception:
+            pass
+        if not meta_set and HAS_MUTAGEN:
+            try:
+                if set_video_metadata(path, date_obj, lat, lon, tz_offset):
+                    log_fn("    ✓ Video metadata (mutagen)")
+                    meta_set = True
+            except Exception as exc:
+                log_fn(f"    ⚠ Metadata error: {exc}")
+        if not meta_set:
+            log_fn("    ℹ Video metadata not set (install ffmpeg or mutagen)")
+    else:
+        if HAS_PIEXIF and ext in (".jpg", ".jpeg"):
+            try:
+                set_image_exif_metadata(path, date_obj, lat, lon, tz_offset)
+                log_fn("    ✓ EXIF metadata")
+            except Exception as exc:
+                log_fn(f"    ⚠ EXIF error: {exc}")
+    set_file_timestamps(path, date_obj)
+
+
+def _copy_file_with_metadata(src, dst, is_video, date_obj, lat, lon, tz_offset, log_fn):
+    """Copy src → dst and apply metadata."""
+    shutil.copy2(src, dst)
+    _apply_file_metadata(dst, is_video, date_obj, lat, lon, tz_offset, log_fn)
+
 
 # ==================== Main ====================
 
