@@ -210,3 +210,4 @@ __marimo__/
 memories_history.json
 example/**
 test files/*
+.idea

@@ -151,8 +151,30 @@ Once you have the files, Snapchat still includes the actual media inside the `me
 
 ### How to use
 
-1. Extract your Snapchat export ZIP(s) as normal
+1. **Download and extract your Snapchat export ZIP(s)**
+
+   Right-click each ZIP → "Extract All..." to unzip it. If you have multiple export ZIPs, extract them all into one parent folder so the structure looks like this:
+
+   ```
+   snapchat/
+   ├── mydata~AAA123/
+   │   └── memories/
+   ├── mydata~BBB456/
+   │   └── memories/
+   └── mydata~CCC789/
+       └── memories/
+   ```
+
+   ![Parent folder containing multiple extracted Snapchat export folders](images/local_mode_parent_folder.png)
+
+   Inside each extracted folder you will find a `memories/` subfolder containing your media files:
+
+   ![Contents of a single extracted export folder showing the memories subfolder](images/local_mode_memories_subfolder.png)
+
 2. At the top of the app, switch the **Mode** to **Process Local Files**
+
+   ![App switched to Process Local Files mode showing the Memories Folder field](images/local_mode_app_screen.png)
+
 3. **JSON File** — select your `memories_history.json` as usual
 4. **Memories Folder** — select one of the following:
    - The `memories/` folder from a single export (e.g. `mydata~XXX/memories/`)
