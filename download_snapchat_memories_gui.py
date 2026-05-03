@@ -807,6 +807,7 @@ class SnapchatDownloaderGUI:
         self.mode = tk.StringVar(value="download")
         self.memories_path = tk.StringVar()
         self.is_local_mode = False  # Tracks which mode is active during processing
+        self.skip_existing_local = tk.BooleanVar(value=False)
         
         # Configure style
         self.setup_styles()
@@ -997,6 +998,19 @@ class SnapchatDownloaderGUI:
         self.memories_section_info = ttk.Label(
             input_card,
             text="Select the memories/ folder OR a parent directory (e.g. snapchat/) to process all exports in bulk",
+            style="Info.TLabel",
+        )
+
+        # Skip existing files (local mode only)
+        self.skip_existing_local_check = ttk.Checkbutton(
+            input_card,
+            text="Skip already-processed files",
+            variable=self.skip_existing_local,
+            style="Card.TCheckbutton",
+        )
+        self.skip_existing_local_info = ttk.Label(
+            input_card,
+            text="Skip files that already exist in the output directory",
             style="Info.TLabel",
         )
         # hidden by default; revealed by _on_mode_change
@@ -1304,20 +1318,24 @@ class SnapchatDownloaderGUI:
     def _on_mode_change(self):
         """Show/hide sections depending on download vs. local-files mode."""
         if self.mode.get() == "local":
-            # Show memories folder
+            # Show memories folder + local-only options
             self.memories_section_label.pack(anchor=tk.W, pady=(0, 8))
             self.memories_section_frame.pack(fill=tk.X, pady=(0, 8))
-            self.memories_section_info.pack(anchor=tk.W, pady=(0, 15))
+            self.memories_section_info.pack(anchor=tk.W, pady=(0, 8))
+            self.skip_existing_local_check.pack(anchor=tk.W, padx=(6, 0))
+            self.skip_existing_local_info.pack(anchor=tk.W, padx=(26, 0), pady=(2, 15))
             # Hide download-only sections
             for widget, _ in self._download_only_widgets:
                 widget.pack_forget()
             # Update button label
             self.download_btn.config(text="Process Local Files")
         else:
-            # Hide memories folder
+            # Hide memories folder + local-only options
             self.memories_section_label.pack_forget()
             self.memories_section_frame.pack_forget()
             self.memories_section_info.pack_forget()
+            self.skip_existing_local_check.pack_forget()
+            self.skip_existing_local_info.pack_forget()
             # Restore download-only sections
             for widget, pack_opts in self._download_only_widgets:
                 widget.pack(**pack_opts)
@@ -2399,14 +2417,21 @@ class SnapchatDownloaderGUI:
                 self.log(f"  • {mdir}  ({cnt:,} files)")
             self.log("")
 
+            json_by_sid = {}
             json_by_ts = {}
             for item in json_items:
+                url = item.get("Media Download Url", "")
+                if url:
+                    m = re.search(r"[?&]sid=([^&]+)", url)
+                    if m:
+                        json_by_sid[m.group(1).upper()] = item
                 try:
                     dt = datetime.strptime(item["Date"], "%Y-%m-%d %H:%M:%S UTC")
                     ts = int(dt.timestamp())
-                    json_by_ts[ts] = item
+                    json_by_ts.setdefault(ts, item)
                 except Exception:
                     pass
+            self.log(f"SID index: {len(json_by_sid):,} | timestamp index: {len(json_by_ts):,}")
 
             overlay_mode = self.overlay_mode.get()
             overlay_labels = {"merge": "With overlay only", "original": "Original only", "both": "Both versions"}
@@ -2439,6 +2464,7 @@ class SnapchatDownloaderGUI:
 
             global_idx = 0
             total_success = 0
+            total_skipped = 0
             total_error = 0
             total_matched = 0
             multi = len(memories_folders) > 1
@@ -2474,20 +2500,56 @@ class SnapchatDownloaderGUI:
                     overlay_fname = overlay_map.get(base)
                     overlay_path = os.path.join(memories_dir, overlay_fname) if overlay_fname else None
 
-                    mtime = os.path.getmtime(file_path)
-                    utc_ts = int(mtime + tz_offset.total_seconds())
-                    json_entry = None
-                    for delta in range(-3, 4):
-                        candidate = json_by_ts.get(utc_ts + delta)
-                        if candidate is not None:
-                            json_entry = candidate
-                            break
+                    raw_mtime = os.path.getmtime(file_path)
+
+                    uuid_part = re.sub(r"^\d{4}-\d{2}-\d{2}_", "", base).upper()
+                    json_entry = json_by_sid.get(uuid_part)
+                    if json_entry is None:
+                        utc_ts = int(raw_mtime + tz_offset.total_seconds())
+                        for delta in range(-3, 4):
+                            candidate = json_by_ts.get(utc_ts + delta)
+                            if candidate is not None:
+                                json_entry = candidate
+                                break
 
                     if json_entry:
                         total_matched += 1
                         folder_matched += 1
+                        try:
+                            utc_mtime = datetime.strptime(json_entry["Date"], "%Y-%m-%d %H:%M:%S UTC")
+                        except Exception:
+                            utc_mtime = datetime.utcfromtimestamp(raw_mtime + tz_offset.total_seconds())
+                    else:
+                        fname_date_prefix = re.match(r"(\d{4}-\d{2}-\d{2})", fname)
+                        if fname_date_prefix:
+                            try:
+                                utc_mtime = datetime.strptime(fname_date_prefix.group(1), "%Y-%m-%d")
+                            except Exception:
+                                utc_mtime = datetime.utcfromtimestamp(raw_mtime + tz_offset.total_seconds())
+                        else:
+                            utc_mtime = datetime.utcfromtimestamp(raw_mtime + tz_offset.total_seconds())
 
-                    utc_mtime = datetime.utcfromtimestamp(mtime + tz_offset.total_seconds())
+                    if self.skip_existing_local.get():
+                        ext = os.path.splitext(fname)[1].lower()
+                        try:
+                            date_obj_utc_skip = utc_mtime.replace(tzinfo=timezone.utc)
+                            force_sys = not self.use_gps_tz.get()
+                            lat_skip, lon_skip = parse_location(json_entry.get("Location", "")) if json_entry else (None, None)
+                            local_dt_skip, _, _ = snap_utils.convert_to_local_timezone(
+                                date_obj_utc_skip, lat_skip, lon_skip, force_system_tz=force_sys
+                            )
+                            date_str_preview = local_dt_skip.strftime("%Y%m%d_%H%M%S")
+                        except Exception:
+                            date_str_preview = utc_mtime.strftime("%Y%m%d_%H%M%S")
+                        candidate_name = f"{date_str_preview}_{global_idx}{ext}"
+                        if (output_path / candidate_name).exists():
+                            self.log(f"[{global_idx}/{grand_total}] {fname}")
+                            self.log(f"  ↷ Skipped (already exists: {candidate_name})")
+                            self.log("")
+                            total_skipped += 1
+                            folder_success += 1
+                            self.update_progress(global_idx, grand_total, is_resume_mode=False)
+                            continue
 
                     logs, success, error = self._process_local_file(
                         global_idx, grand_total, fname, file_path, overlay_path,
@@ -2515,6 +2577,8 @@ class SnapchatDownloaderGUI:
             if multi:
                 self.log(f"Folders:          {len(memories_folders)}")
             self.log(f"Files processed:  {total_success} / {grand_total}")
+            if total_skipped:
+                self.log(f"Skipped:          {total_skipped}")
             self.log(f"Metadata matched: {total_matched} / {grand_total}")
             self.log(f"Failed:           {total_error}")
             self.log(f"Output:           {output_dir}")
@@ -2525,6 +2589,7 @@ class SnapchatDownloaderGUI:
                     "Complete",
                     (f"{len(memories_folders)} folders\n" if multi else "")
                     + f"Processed {total_success} of {grand_total} files\n"
+                    + (f"Skipped: {total_skipped}\n" if total_skipped else "")
                     + f"Metadata matched: {total_matched}\n"
                     + f"Failed: {total_error}\n"
                     + f"Output: {output_dir}",
