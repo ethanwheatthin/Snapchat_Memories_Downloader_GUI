@@ -116,7 +116,10 @@ def parse_location(location_str):
     try:
         coords = location_str.split(": ")[1]
         lat, lon = coords.split(", ")
-        return float(lat), float(lon)
+        lat, lon = float(lat), float(lon)
+        if lat == 0.0 and lon == 0.0:
+            return None, None
+        return lat, lon
     except Exception:
         return None, None
 
