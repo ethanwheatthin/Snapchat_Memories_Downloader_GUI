@@ -2417,21 +2417,29 @@ class SnapchatDownloaderGUI:
                 self.log(f"  • {mdir}  ({cnt:,} files)")
             self.log("")
 
-            json_by_sid = {}
+            # Index by every UUID we can pull from either URL. Snapchat exports
+            # vary: some put the filename-UUID in sid, some in mid, and some
+            # users have an empty Media Download Url entirely (issue #44) — in
+            # which case we still want to match against Download Link.
+            json_by_uuid = {}
             json_by_ts = {}
+            uuid_param_re = re.compile(
+                r"[?&](?:sid|mid)=([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"
+            )
             for item in json_items:
-                url = item.get("Media Download Url", "")
-                if url:
-                    m = re.search(r"[?&]sid=([^&]+)", url)
-                    if m:
-                        json_by_sid[m.group(1).upper()] = item
+                for url_key in ("Media Download Url", "Download Link"):
+                    url = item.get(url_key, "")
+                    if not url:
+                        continue
+                    for uuid_match in uuid_param_re.findall(url):
+                        json_by_uuid.setdefault(uuid_match.upper(), item)
                 try:
                     dt = datetime.strptime(item["Date"], "%Y-%m-%d %H:%M:%S UTC")
                     ts = int(dt.timestamp())
                     json_by_ts.setdefault(ts, item)
                 except Exception:
                     pass
-            self.log(f"SID index: {len(json_by_sid):,} | timestamp index: {len(json_by_ts):,}")
+            self.log(f"UUID index: {len(json_by_uuid):,} | timestamp index: {len(json_by_ts):,}")
 
             overlay_mode = self.overlay_mode.get()
             overlay_labels = {"merge": "With overlay only", "original": "Original only", "both": "Both versions"}
@@ -2503,7 +2511,7 @@ class SnapchatDownloaderGUI:
                     raw_mtime = os.path.getmtime(file_path)
 
                     uuid_part = re.sub(r"^\d{4}-\d{2}-\d{2}_", "", base).upper()
-                    json_entry = json_by_sid.get(uuid_part)
+                    json_entry = json_by_uuid.get(uuid_part)
                     if json_entry is None:
                         utc_ts = int(raw_mtime + tz_offset.total_seconds())
                         for delta in range(-3, 4):
@@ -2541,10 +2549,20 @@ class SnapchatDownloaderGUI:
                             date_str_preview = local_dt_skip.strftime("%Y%m%d_%H%M%S")
                         except Exception:
                             date_str_preview = utc_mtime.strftime("%Y%m%d_%H%M%S")
-                        candidate_name = f"{date_str_preview}_{global_idx}{ext}"
-                        if (output_path / candidate_name).exists():
+
+                        # Build the full set of outputs this file would produce
+                        # for the current overlay mode and only skip when ALL of
+                        # them exist — previously a half-finished "both" run
+                        # left an _original missing and was still skipped.
+                        overlay_mode_skip = self.overlay_mode.get()
+                        has_overlay_skip = bool(overlay_path and os.path.exists(overlay_path))
+                        expected = [f"{date_str_preview}_{global_idx}{ext}"]
+                        if has_overlay_skip and overlay_mode_skip == "both":
+                            expected.append(f"{date_str_preview}_{global_idx}_original{ext}")
+
+                        if all((output_path / n).exists() for n in expected):
                             self.log(f"[{global_idx}/{grand_total}] {fname}")
-                            self.log(f"  ↷ Skipped (already exists: {candidate_name})")
+                            self.log(f"  ↷ Skipped (already exists: {expected[0]})")
                             self.log("")
                             total_skipped += 1
                             folder_success += 1
