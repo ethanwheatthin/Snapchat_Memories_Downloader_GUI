@@ -808,6 +808,10 @@ class SnapchatDownloaderGUI:
         self.memories_path = tk.StringVar()
         self.is_local_mode = False  # Tracks which mode is active during processing
         self.skip_existing_local = tk.BooleanVar(value=False)
+        # Multi-segment video stitcher is disabled until we've tested it
+        # against real exports; flip default back to True + uncomment the
+        # checkbox in create_widgets() / _on_mode_change to re-enable.
+        self.stitch_segments_local = tk.BooleanVar(value=False)
         
         # Configure style
         self.setup_styles()
@@ -1011,6 +1015,17 @@ class SnapchatDownloaderGUI:
         self.skip_existing_local_info = ttk.Label(
             input_card,
             text="Skip files that already exist in the output directory",
+            style="Info.TLabel",
+        )
+        self.stitch_segments_local_check = ttk.Checkbutton(
+            input_card,
+            text="Stitch multi-segment videos (>10s recordings)",
+            variable=self.stitch_segments_local,
+            style="Card.TCheckbutton",
+        )
+        self.stitch_segments_local_info = ttk.Label(
+            input_card,
+            text="Snapchat splits videos longer than 10 seconds — re-join the segments after processing",
             style="Info.TLabel",
         )
         # hidden by default; revealed by _on_mode_change
@@ -1324,6 +1339,9 @@ class SnapchatDownloaderGUI:
             self.memories_section_info.pack(anchor=tk.W, pady=(0, 8))
             self.skip_existing_local_check.pack(anchor=tk.W, padx=(6, 0))
             self.skip_existing_local_info.pack(anchor=tk.W, padx=(26, 0), pady=(2, 15))
+            # Multi-segment stitcher hidden until tested — see __init__ note.
+            # self.stitch_segments_local_check.pack(anchor=tk.W, padx=(6, 0))
+            # self.stitch_segments_local_info.pack(anchor=tk.W, padx=(26, 0), pady=(2, 15))
             # Hide download-only sections
             for widget, _ in self._download_only_widgets:
                 widget.pack_forget()
@@ -1336,6 +1354,8 @@ class SnapchatDownloaderGUI:
             self.memories_section_info.pack_forget()
             self.skip_existing_local_check.pack_forget()
             self.skip_existing_local_info.pack_forget()
+            # self.stitch_segments_local_check.pack_forget()
+            # self.stitch_segments_local_info.pack_forget()
             # Restore download-only sections
             for widget, pack_opts in self._download_only_widgets:
                 widget.pack(**pack_opts)
@@ -2417,21 +2437,98 @@ class SnapchatDownloaderGUI:
                 self.log(f"  • {mdir}  ({cnt:,} files)")
             self.log("")
 
-            json_by_sid = {}
+            # Index by every UUID we can pull from either URL. Snapchat exports
+            # vary: some put the filename-UUID in sid, some in mid, and some
+            # users have an empty Media Download Url entirely (issue #44) — in
+            # which case we still want to match against Download Link.
+            #
+            # json_by_day handles the case where the export has no URLs at all
+            # (issue #57): we can still pair each file to a JSON entry by the
+            # YYYY-MM-DD prefix Snapchat writes into every filename, ordering
+            # files within a day by their on-disk name and JSON entries by
+            # capture time. When both counts match for a day, pairing by
+            # ordinal preserves the exact JSON time/GPS rather than collapsing
+            # to "midnight, no GPS".
+            json_by_uuid = {}
             json_by_ts = {}
-            for item in json_items:
-                url = item.get("Media Download Url", "")
-                if url:
-                    m = re.search(r"[?&]sid=([^&]+)", url)
-                    if m:
-                        json_by_sid[m.group(1).upper()] = item
+            json_by_day = {}
+            uuid_param_re = re.compile(
+                r"[?&](?:sid|mid)=([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"
+            )
+            for json_idx, item in enumerate(json_items):
+                item["_json_idx"] = json_idx
+                for url_key in ("Media Download Url", "Download Link"):
+                    url = item.get(url_key, "")
+                    if not url:
+                        continue
+                    for uuid_match in uuid_param_re.findall(url):
+                        json_by_uuid.setdefault(uuid_match.upper(), item)
                 try:
                     dt = datetime.strptime(item["Date"], "%Y-%m-%d %H:%M:%S UTC")
                     ts = int(dt.timestamp())
                     json_by_ts.setdefault(ts, item)
+                    json_by_day.setdefault(item["Date"][:10], []).append((dt, item))
                 except Exception:
                     pass
-            self.log(f"SID index: {len(json_by_sid):,} | timestamp index: {len(json_by_ts):,}")
+            for day in json_by_day:
+                json_by_day[day].sort(key=lambda t: t[0])
+            self.log(
+                f"UUID index: {len(json_by_uuid):,} | "
+                f"timestamp index: {len(json_by_ts):,} | "
+                f"day index: {len(json_by_day):,}"
+            )
+
+            # Snapchat caps a single snap at ~10s; longer recordings are
+            # stored as a sequence of contiguous video entries (issues #47,
+            # #53). Group consecutive Video items at the same Location within
+            # 11s of each other so we can stitch them back together after
+            # per-segment processing.
+            segment_groups = []
+            entry_to_group = {}
+            if self.stitch_segments_local.get():
+                video_items = []
+                for item in json_items:
+                    if item.get("Media Type") != "Video":
+                        continue
+                    try:
+                        vdt = datetime.strptime(item["Date"], "%Y-%m-%d %H:%M:%S UTC")
+                    except Exception:
+                        continue
+                    video_items.append((vdt, item))
+                video_items.sort(key=lambda t: t[0])
+
+                current_group = []
+                prev_dt = None
+                prev_loc = None
+                for vdt, vitem in video_items:
+                    vloc = vitem.get("Location", "")
+                    contiguous = (
+                        prev_dt is not None
+                        and (vdt - prev_dt).total_seconds() <= 11
+                        and vloc == prev_loc
+                    )
+                    if contiguous:
+                        current_group.append(vitem)
+                    else:
+                        if len(current_group) > 1:
+                            segment_groups.append(current_group)
+                        current_group = [vitem]
+                    prev_dt = vdt
+                    prev_loc = vloc
+                if len(current_group) > 1:
+                    segment_groups.append(current_group)
+
+                for gid, group in enumerate(segment_groups):
+                    for vitem in group:
+                        entry_to_group[vitem["_json_idx"]] = gid
+
+                if segment_groups:
+                    total_segments = sum(len(g) for g in segment_groups)
+                    self.log(
+                        f"🔗 Detected {len(segment_groups):,} multi-segment "
+                        f"recording(s) covering {total_segments:,} clips — "
+                        f"will stitch after processing"
+                    )
 
             overlay_mode = self.overlay_mode.get()
             overlay_labels = {"merge": "With overlay only", "original": "Original only", "both": "Both versions"}
@@ -2468,6 +2565,10 @@ class SnapchatDownloaderGUI:
             total_error = 0
             total_matched = 0
             multi = len(memories_folders) > 1
+            # entry_to_output: json_idx -> (datetime, primary_output_path)
+            # Captured per-file so the segment-stitch post-pass can pull the
+            # right outputs back out in capture-time order.
+            entry_to_output = {}
 
             for folder_num, (memories_dir, main_files) in enumerate(all_folder_files, 1):
                 if self.stop_download:
@@ -2484,6 +2585,17 @@ class SnapchatDownloaderGUI:
                     if "-overlay" in fname:
                         base = re.sub(r"-overlay\.[^.]+$", "", fname)
                         overlay_map[base] = fname
+
+                # Pre-compute each file's ordinal within its YYYY-MM-DD bucket
+                # so the day-pairing fallback below can map an unmatched file
+                # to a JSON entry deterministically (issue #57).
+                files_by_day = {}
+                for f in main_files:
+                    files_by_day.setdefault(f[:10], []).append(f)
+                file_day_ordinal = {}
+                for day, flist in files_by_day.items():
+                    for i, f in enumerate(flist):
+                        file_day_ordinal[f] = (day, i, len(flist))
 
                 folder_success = 0
                 folder_matched = 0
@@ -2503,7 +2615,7 @@ class SnapchatDownloaderGUI:
                     raw_mtime = os.path.getmtime(file_path)
 
                     uuid_part = re.sub(r"^\d{4}-\d{2}-\d{2}_", "", base).upper()
-                    json_entry = json_by_sid.get(uuid_part)
+                    json_entry = json_by_uuid.get(uuid_part)
                     if json_entry is None:
                         utc_ts = int(raw_mtime + tz_offset.total_seconds())
                         for delta in range(-3, 4):
@@ -2511,6 +2623,23 @@ class SnapchatDownloaderGUI:
                             if candidate is not None:
                                 json_entry = candidate
                                 break
+
+                    # Day-pairing fallback (issue #57): the export's URL fields
+                    # may be empty, and ZIP extraction may have stomped mtimes,
+                    # so neither UUID nor timestamp matches. If the file count
+                    # for this day matches the JSON entry count, pair by
+                    # ordinal — gives the correct date+time+GPS rather than
+                    # midnight UTC with no location. When counts differ but
+                    # the day has exactly one JSON entry, use it.
+                    if json_entry is None:
+                        day_info = file_day_ordinal.get(fname)
+                        if day_info is not None:
+                            day, ordinal, file_count = day_info
+                            day_entries = json_by_day.get(day, [])
+                            if len(day_entries) == file_count:
+                                json_entry = day_entries[ordinal][1]
+                            elif len(day_entries) == 1:
+                                json_entry = day_entries[0][1]
 
                     if json_entry:
                         total_matched += 1
@@ -2541,17 +2670,27 @@ class SnapchatDownloaderGUI:
                             date_str_preview = local_dt_skip.strftime("%Y%m%d_%H%M%S")
                         except Exception:
                             date_str_preview = utc_mtime.strftime("%Y%m%d_%H%M%S")
-                        candidate_name = f"{date_str_preview}_{global_idx}{ext}"
-                        if (output_path / candidate_name).exists():
+
+                        # Build the full set of outputs this file would produce
+                        # for the current overlay mode and only skip when ALL of
+                        # them exist — previously a half-finished "both" run
+                        # left an _original missing and was still skipped.
+                        overlay_mode_skip = self.overlay_mode.get()
+                        has_overlay_skip = bool(overlay_path and os.path.exists(overlay_path))
+                        expected = [f"{date_str_preview}_{global_idx}{ext}"]
+                        if has_overlay_skip and overlay_mode_skip == "both":
+                            expected.append(f"{date_str_preview}_{global_idx}_original{ext}")
+
+                        if all((output_path / n).exists() for n in expected):
                             self.log(f"[{global_idx}/{grand_total}] {fname}")
-                            self.log(f"  ↷ Skipped (already exists: {candidate_name})")
+                            self.log(f"  ↷ Skipped (already exists: {expected[0]})")
                             self.log("")
                             total_skipped += 1
                             folder_success += 1
                             self.update_progress(global_idx, grand_total, is_resume_mode=False)
                             continue
 
-                    logs, success, error = self._process_local_file(
+                    logs, success, error, primary_out = self._process_local_file(
                         global_idx, grand_total, fname, file_path, overlay_path,
                         json_entry, utc_mtime, output_path,
                     )
@@ -2565,12 +2704,88 @@ class SnapchatDownloaderGUI:
                     if error:
                         total_error += 1
 
+                    # Remember this video's primary output so the stitch
+                    # post-pass can find it. Only videos with a JSON match
+                    # participate in stitching.
+                    if (primary_out and json_entry is not None
+                        and os.path.splitext(primary_out)[1].lower()
+                            in (".mp4", ".mov", ".m4v", ".avi", ".mkv")
+                        and json_entry["_json_idx"] in entry_to_group):
+                        entry_to_output[json_entry["_json_idx"]] = (
+                            datetime.strptime(json_entry["Date"], "%Y-%m-%d %H:%M:%S UTC"),
+                            primary_out,
+                        )
+
                     self.update_progress(global_idx, grand_total, is_resume_mode=False)
                     self.log("")
 
                 if multi:
                     self.log(f"  ✓ Folder done: {folder_success}/{len(main_files)} "
                              f"processed, {folder_matched}/{len(main_files)} matched\n")
+
+            total_stitched = 0
+            total_stitch_failed = 0
+            if segment_groups and not self.stop_download:
+                self.log("━━━ Stitching multi-segment videos ━━━")
+                for gid, group in enumerate(segment_groups, 1):
+                    if self.stop_download:
+                        break
+                    indices = [vitem["_json_idx"] for vitem in group]
+                    parts = [entry_to_output.get(i) for i in indices]
+                    if any(p is None for p in parts):
+                        missing = sum(1 for p in parts if p is None)
+                        self.log(
+                            f"[{gid}/{len(segment_groups)}] Skipped — "
+                            f"{missing}/{len(parts)} segment(s) not produced"
+                        )
+                        continue
+
+                    parts.sort(key=lambda t: t[0])
+                    segment_paths = [p[1] for p in parts]
+                    first_dt, first_path = parts[0]
+                    out_dir = Path(os.path.dirname(first_path))
+                    ext = os.path.splitext(first_path)[1].lower()
+                    stem = Path(first_path).stem
+                    joined_path = out_dir / f"{stem}_joined{ext}"
+                    counter = 1
+                    while joined_path.exists():
+                        joined_path = out_dir / f"{stem}_joined_{counter}{ext}"
+                        counter += 1
+
+                    self.log(
+                        f"[{gid}/{len(segment_groups)}] Joining "
+                        f"{len(segment_paths)} segments → {joined_path.name}"
+                    )
+                    ok, result = zip_utils.concat_video_segments(segment_paths, str(joined_path))
+                    if ok:
+                        # Re-apply metadata to the joined file using the first
+                        # segment's date/GPS (the whole recording starts then).
+                        try:
+                            entry = group[0]
+                            date_obj_utc = parse_date(entry["Date"])
+                            latitude, longitude = parse_location(entry.get("Location", ""))
+                            force_sys = not self.use_gps_tz.get()
+                            local_dt, _, tz_off_str = snap_utils.convert_to_local_timezone(
+                                date_obj_utc, latitude, longitude, force_system_tz=force_sys
+                            )
+                            _apply_file_metadata(
+                                str(joined_path), True, local_dt,
+                                latitude, longitude, tz_off_str, lambda m: None
+                            )
+                        except Exception as meta_err:
+                            logging.warning(f"Joined metadata failed: {meta_err}")
+
+                        for sp in segment_paths:
+                            try:
+                                os.remove(sp)
+                            except Exception:
+                                pass
+                        total_stitched += 1
+                        self.log(f"  ✓ Stitched → {joined_path.name}")
+                    else:
+                        total_stitch_failed += 1
+                        self.log(f"  ✗ Stitch failed: {result}")
+                self.log("")
 
             self.log("=" * 50)
             self.log("Processing Complete!")
@@ -2581,6 +2796,11 @@ class SnapchatDownloaderGUI:
                 self.log(f"Skipped:          {total_skipped}")
             self.log(f"Metadata matched: {total_matched} / {grand_total}")
             self.log(f"Failed:           {total_error}")
+            if total_stitched or total_stitch_failed:
+                self.log(
+                    f"Stitched videos:  {total_stitched}"
+                    + (f" ({total_stitch_failed} failed)" if total_stitch_failed else "")
+                )
             self.log(f"Output:           {output_dir}")
             self.log("=" * 50)
 
@@ -2645,6 +2865,7 @@ class SnapchatDownloaderGUI:
             overlay_mode = self.overlay_mode.get()
 
             has_overlay = overlay_path and os.path.exists(overlay_path)
+            primary_output = None
 
             if has_overlay and overlay_mode in ("merge", "both"):
                 out_name = f"{date_str}_{idx}{ext}"
@@ -2659,11 +2880,13 @@ class SnapchatDownloaderGUI:
                     log_local(f"  ✓ Merged overlay → {out_name}")
                     _apply_file_metadata(result, is_video, local_dt, latitude, longitude,
                                         tz_off_str, log_local)
+                    primary_output = out_file
                 else:
                     log_local(f"  ⚠ Merge failed ({result}), copying original instead")
                     out_file = str(output_path / out_name)
                     _copy_file_with_metadata(file_path, out_file, is_video, local_dt,
                                              latitude, longitude, tz_off_str, log_local)
+                    primary_output = out_file
 
                 if overlay_mode == "both":
                     orig_name = f"{date_str}_{idx}_original{ext}"
@@ -2678,13 +2901,14 @@ class SnapchatDownloaderGUI:
                 _copy_file_with_metadata(file_path, out_file, is_video, local_dt,
                                          latitude, longitude, tz_off_str, log_local)
                 log_local(f"  ✓ → {out_name}")
+                primary_output = out_file
 
-            return logs, True, False
+            return logs, True, False, primary_output
 
         except Exception as exc:
             logs.append(f"  ✗ Error: {exc}")
             logging.error(f"_process_local_file {fname}: {exc}", exc_info=True)
-            return logs, False, True
+            return logs, False, True, None
 
 def find_memories_folders(root_dir):
     """Return all memories/ folders found at or under root_dir."""

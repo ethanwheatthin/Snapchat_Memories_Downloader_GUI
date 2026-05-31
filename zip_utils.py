@@ -325,6 +325,85 @@ def merge_video_overlay(main_video_path, overlay_image_path, output_path):
                 logging.debug(f"Could not remove normalized overlay: {cleanup_error}")
 
 
+def concat_video_segments(input_paths, output_path):
+    """Concatenate multiple video files into one using ffmpeg.
+
+    Snapchat caps a single snap at ~10s; longer recordings land in the export
+    as a sequence of contiguous segments (issues #47, #53). After per-segment
+    overlay merging, this joins the segments back into the original recording.
+
+    Re-encodes using the filter_complex concat filter so it tolerates segments
+    with mismatched codec params or one segment having audio while another
+    doesn't. Returns (True, output_path) on success, (False, error_message)
+    otherwise.
+    """
+    if shutil.which('ffmpeg') is None or shutil.which('ffprobe') is None:
+        return False, "ffmpeg/ffprobe not found"
+    if len(input_paths) < 2:
+        return False, "need at least two segments to concat"
+
+    try:
+        segments_have_audio = []
+        for p in input_paths:
+            try:
+                probe = subprocess.run(
+                    ['ffprobe', '-v', 'error', '-select_streams', 'a',
+                     '-show_entries', 'stream=codec_type',
+                     '-of', 'default=nw=1:nk=1', str(p)],
+                    capture_output=True, text=True, timeout=10,
+                    creationflags=CREATE_NO_WINDOW,
+                )
+                segments_have_audio.append('audio' in probe.stdout)
+            except Exception:
+                segments_have_audio.append(False)
+
+        all_have_audio = all(segments_have_audio)
+
+        cmd = ['ffmpeg', '-y']
+        for p in input_paths:
+            cmd.extend(['-i', str(p)])
+
+        n = len(input_paths)
+        if all_have_audio:
+            filter_parts = ''.join(f'[{i}:v:0][{i}:a:0]' for i in range(n))
+            filter_complex = f'{filter_parts}concat=n={n}:v=1:a=1[outv][outa]'
+            cmd.extend([
+                '-filter_complex', filter_complex,
+                '-map', '[outv]', '-map', '[outa]',
+                '-c:v', 'libx264', '-crf', '18', '-preset', 'veryfast',
+                '-c:a', 'aac', '-b:a', '192k',
+                str(output_path),
+            ])
+        else:
+            filter_parts = ''.join(f'[{i}:v:0]' for i in range(n))
+            filter_complex = f'{filter_parts}concat=n={n}:v=1:a=0[outv]'
+            cmd.extend([
+                '-filter_complex', filter_complex,
+                '-map', '[outv]',
+                '-c:v', 'libx264', '-crf', '18', '-preset', 'veryfast',
+                str(output_path),
+            ])
+
+        timeout = max(300, 60 * n)
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=timeout,
+            creationflags=CREATE_NO_WINDOW,
+        )
+        if proc.returncode != 0:
+            logging.error(f"ffmpeg concat failed: {proc.stderr[-500:]}")
+            return False, proc.stderr.splitlines()[-1] if proc.stderr else 'ffmpeg failed'
+
+        if not os.path.exists(output_path) or os.path.getsize(output_path) < 1000:
+            return False, "output too small"
+        return True, str(output_path)
+
+    except subprocess.TimeoutExpired:
+        return False, "ffmpeg concat timed out"
+    except Exception as e:
+        logging.error(f"concat_video_segments error: {e}", exc_info=True)
+        return False, str(e)
+
+
 def process_zip_overlay(zip_path, output_dir, date_obj=None):
     """Process ZIP files containing main and overlay media pairs.
     

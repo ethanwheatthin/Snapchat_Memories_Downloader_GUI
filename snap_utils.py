@@ -137,12 +137,70 @@ def decimal_to_dms(decimal):
 
 
 def set_file_timestamps(file_path, date_obj):
-    """Set file modification and access times."""
+    """Set file modification, access, and (Windows) creation times.
+
+    On Windows the "Date created" Explorer column is a separate filesystem
+    field that os.utime cannot touch — without setting it, locally processed
+    files keep today's date as creation date even when modified date is
+    correct (issue #44). We call Win32 SetFileTime via ctypes to fix that;
+    no extra dependency required.
+    """
     timestamp = date_obj.timestamp()
     try:
         os.utime(file_path, (timestamp, timestamp))
     except Exception:
         logging.debug("Failed to set timestamps for %s", file_path)
+        return
+
+    if os.name == 'nt':
+        try:
+            _set_windows_creation_time(file_path, timestamp)
+        except Exception as e:
+            logging.debug("Failed to set Windows creation time for %s: %s", file_path, e)
+
+
+def _set_windows_creation_time(file_path, unix_timestamp):
+    """Set the Windows creation time of a file via kernel32.SetFileTime."""
+    import ctypes
+    from ctypes import wintypes
+
+    # FILETIME = 100-ns ticks since 1601-01-01 UTC; Unix epoch offset = 11644473600s.
+    filetime_ticks = int((unix_timestamp + 11644473600) * 10_000_000)
+    ft = wintypes.FILETIME(filetime_ticks & 0xFFFFFFFF, (filetime_ticks >> 32) & 0xFFFFFFFF)
+
+    GENERIC_WRITE = 0x40000000
+    FILE_SHARE_READ = 0x00000001
+    FILE_SHARE_WRITE = 0x00000002
+    OPEN_EXISTING = 3
+    FILE_ATTRIBUTE_NORMAL = 0x80
+    INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+
+    kernel32 = ctypes.windll.kernel32
+    kernel32.CreateFileW.restype = wintypes.HANDLE
+    kernel32.SetFileTime.argtypes = [
+        wintypes.HANDLE,
+        ctypes.POINTER(wintypes.FILETIME),
+        ctypes.POINTER(wintypes.FILETIME),
+        ctypes.POINTER(wintypes.FILETIME),
+    ]
+
+    handle = kernel32.CreateFileW(
+        str(file_path),
+        GENERIC_WRITE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
+        None,
+        OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL,
+        None,
+    )
+    if not handle or handle == INVALID_HANDLE_VALUE:
+        raise OSError(f"CreateFileW failed for {file_path}: {ctypes.get_last_error()}")
+
+    try:
+        if not kernel32.SetFileTime(handle, ctypes.byref(ft), ctypes.byref(ft), ctypes.byref(ft)):
+            raise OSError(f"SetFileTime failed for {file_path}: {ctypes.get_last_error()}")
+    finally:
+        kernel32.CloseHandle(handle)
 
 
 def get_file_extension(media_type):
