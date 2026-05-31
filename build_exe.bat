@@ -1,24 +1,10 @@
 @echo off
+REM Single source of truth for the release build (issue #45). The .spec
+REM uses collect_all('timezonefinder') to ensure the timezone polygons ship
+REM with the EXE; any future tweaks belong in SnapchatMemoriesDownloader.spec,
+REM not in flags here.
 echo Building Snapchat Memories Downloader executable...
-pyinstaller --onefile --windowed --name=SnapchatMemoriesDownloader ^
-  --hidden-import=av ^
-  --hidden-import=mutagen ^
-  --hidden-import=mutagen.mp4 ^
-  --hidden-import=piexif ^
-  --hidden-import=PIL ^
-  --hidden-import=PIL.Image ^
-  --hidden-import=timezonefinder ^
-  --hidden-import=pytz ^
-  --hidden-import=tzlocal ^
-  --hidden-import=video_utils ^
-  --hidden-import=snap_utils ^
-  --hidden-import=zip_utils ^
-  --hidden-import=downloader ^
-  --hidden-import=exif_utils ^
-  --collect-all=av ^
-  --collect-data=timezonefinder ^
-  --noconsole download_snapchat_memories_gui.py
-
+pyinstaller --clean SnapchatMemoriesDownloader.spec
 echo.
 echo Build complete! Check the dist folder for SnapchatMemoriesDownloader.exe
 pause
