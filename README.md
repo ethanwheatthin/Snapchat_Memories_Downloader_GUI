@@ -50,14 +50,13 @@ This tool downloads all your Snapchat memories using the `memories_history.json`
 3. **RESTART YOUR COMPUTER AFTER INSTALLING VLC AND FFMPEG**
 4. **Run the application** — Double-click the `.exe` file ('Run anyway' if you get a windows security warning)
 5. Follow the usage instructions below
-   - **IMPORTANT:** 
-   If you keep getting the "no download URL found, skipping" message. Please refer to the [Local Processing Guide](https://github.com/ethanwheatthin/Snapchat_Memories_Downloader_GUI#-processing-local-files-no-download-urls). It takes some setup but has been reported as the most realiable if the memories_histpry.json method is not working for you. 
+   >  **Note:** If you keep getting the "no download URL found, skipping" message. Please refer to the [Local Processing Guide](https://github.com/ethanwheatthin/Snapchat_Memories_Downloader_GUI#-processing-local-files-no-download-urls). It takes some setup but has been reported as the most realiable if the memories_histpry.json method is not working for you. 
 
    
 
 ## 📥 How to Get Your Snapchat Data
 
-**Note:** Snapchat exports expire after 7 days. It is advised to move quickly when you get access to your full export from snapchat. If you get errors it's best to just request a new batch and reproces that.
+> **Note:** Snapchat exports expire after 7 days. It is advised to move quickly when you get access to your full export from snapchat. If you get errors it's best to just request a new batch and reproces that.
 
 1. Open **Snapchat** on your mobile device
 2. Tap your **profile icon** (top-left) → **⚙️ Settings** (top-right)
