@@ -47,26 +47,17 @@ This tool downloads all your Snapchat memories using the `memories_history.json`
 2. **Install optional tools** for best results:
    - **VLC Media Player** ([download](https://www.videolan.org/)) — enables video conversion to H.264
    - **FFmpeg** ([download](https://www.ffmpeg.org/download.html)) — enhances video overlay merging
-3. **Run the application** — Double-click the `.exe` file (no installation needed)
-4. Follow the usage instructions below
+3. **RESTART YOUR COMPUTER AFTER INSTALLING VLC AND FFMPEG**
+4. **Run the application** — Double-click the `.exe` file ('Run anyway' if you get a windows security warning)
+5. Follow the usage instructions below
+   - **IMPORTANT:** 
+   If you keep getting the "no download URL found, skipping" message. Please refer to the [Local Processing Guide](https://github.com/ethanwheatthin/Snapchat_Memories_Downloader_GUI#-processing-local-files-no-download-urls). It takes some setup but has been reported as the most realiable if the memories_histpry.json method is not working for you. 
 
-### Running from Source
-
-For developers or advanced users:
-
-```bash
-# Clone the repository
-git clone https://github.com/ethanwheatthin/Snapchat_Memories_Downloader_GUI.git
-cd Snapchat_Memories_Downloader_GUI
-
-# Install dependencies
-pip install -r requirements.txt
-
-# Run the application
-python download_snapchat_memories_gui.py
-```
+   
 
 ## 📥 How to Get Your Snapchat Data
+
+**Note:** Snapchat exports expire after 7 days. It is advised to move quickly when you get access to your full export from snapchat. If you get errors it's best to just request a new batch and reproces that.
 
 1. Open **Snapchat** on your mobile device
 2. Tap your **profile icon** (top-left) → **⚙️ Settings** (top-right)
@@ -217,7 +208,7 @@ Core libraries:
 
 > **Note:** The application gracefully handles missing optional packages. If timezone libraries aren't installed, timestamps default to UTC. If EXIF/video metadata libraries are missing, files are still downloaded but without embedded metadata.
 
-### Optional Tools
+### REQUIRED Tools
 
 - **VLC Media Player** — Automatic video conversion to H.264 (highly recommended)
 - **FFmpeg** — Enhanced video overlay processing
@@ -233,8 +224,23 @@ pip install pyinstaller
 # Use the provided build script
 build_exe.bat
 ```
-
 The executable will be created in the `dist` folder. The build script includes necessary hidden imports for all dependencies.
+
+### Running from Source
+
+For developers or advanced users:
+
+```bash
+# Clone the repository
+git clone https://github.com/ethanwheatthin/Snapchat_Memories_Downloader_GUI.git
+cd Snapchat_Memories_Downloader_GUI
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Run the application
+python download_snapchat_memories_gui.py
+```
 
 ## 🧪 Testing
 
@@ -264,7 +270,6 @@ python -m pytest tests/ -v --tb=short
 
 ## 📝 Important Notes
 
-- **Internet Required** — Active connection needed to download from Snapchat servers
 - **Storage Space** — Ensure sufficient disk space for all memories
 - **URL Expiration** — Download links expire over time; process your data export promptly
 - **Privacy** — All processing happens locally on your computer; no data is sent elsewhere
