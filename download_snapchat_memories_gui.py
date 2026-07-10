@@ -90,6 +90,7 @@ logging.basicConfig(
 
 # --- Delegated to refactored utility module ---
 import snap_utils, exif_utils, video_utils, zip_utils, downloader
+import chat_media_utils
 
 # Windows-specific subprocess flag to prevent command windows from popping up
 CREATE_NO_WINDOW = 0x08000000 if sys.platform == 'win32' else 0
@@ -834,9 +835,12 @@ class SnapchatDownloaderGUI:
         # Overlay merge preference: "merge" = overlay only, "original" = original only, "both" = save both
         self.overlay_mode = tk.StringVar(value="merge")
 
-        # Mode: "download" = normal download from URLs, "local" = process already-downloaded local files
+        # Mode: "download" = normal download from URLs, "local" = process
+        # already-downloaded local files, "chatmedia" = merge captions and fix
+        # metadata for a chat_media export folder
         self.mode = tk.StringVar(value="download")
         self.memories_path = tk.StringVar()
+        self.chat_media_path = tk.StringVar()
         self.is_local_mode = False  # Tracks which mode is active during processing
         self.skip_existing_local = tk.BooleanVar(value=False)
         # Multi-segment video stitcher is disabled until we've tested it
@@ -985,6 +989,16 @@ class SnapchatDownloaderGUI:
         )
         mode_rb_local.pack(anchor=tk.W, pady=(4, 0))
 
+        mode_rb_chatmedia = ttk.Radiobutton(
+            mode_frame,
+            text="Process Chat Media  —  merge captions and fix metadata for chat_media exports",
+            variable=self.mode,
+            value="chatmedia",
+            style="Card.TRadiobutton",
+            command=self._on_mode_change,
+        )
+        mode_rb_chatmedia.pack(anchor=tk.W, pady=(4, 0))
+
         mode_info = ttk.Label(
             input_card,
             text="Use 'Process Local Files' when Snapchat didn't include download URLs in your export "
@@ -998,25 +1012,25 @@ class SnapchatDownloaderGUI:
 
         ttk.Separator(input_card, orient="horizontal").pack(fill=tk.X, pady=(0, 15))
 
-        # JSON file selection
-        json_label = ttk.Label(input_card, text="JSON File", style="Header.TLabel")
-        json_label.pack(anchor=tk.W, pady=(0, 8))
-        
-        json_frame = ttk.Frame(input_card, style="Card.TFrame")
-        json_frame.pack(fill=tk.X, pady=(0, 15))
-        
-        self.json_entry = ttk.Entry(json_frame, textvariable=self.json_path, 
+        # JSON file selection (hidden in chat-media mode — auto-discovered there)
+        self.json_section_label = ttk.Label(input_card, text="JSON File", style="Header.TLabel")
+        self.json_section_label.pack(anchor=tk.W, pady=(0, 8))
+
+        self.json_section_frame = ttk.Frame(input_card, style="Card.TFrame")
+        self.json_section_frame.pack(fill=tk.X, pady=(0, 15))
+
+        self.json_entry = ttk.Entry(self.json_section_frame, textvariable=self.json_path,
                                     font=("Segoe UI", 9), width=50)
         self.json_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 10))
-        
-        json_btn = ttk.Button(json_frame, text="Browse...", 
+
+        json_btn = ttk.Button(self.json_section_frame, text="Browse...",
                              command=self.browse_json, style="Secondary.TButton")
         json_btn.pack(side=tk.LEFT)
-        
-        json_info = ttk.Label(input_card,
+
+        self.json_section_info = ttk.Label(input_card,
                              text="Select your memories_history.json file from Snapchat export",
                              style="Info.TLabel")
-        json_info.pack(anchor=tk.W, pady=(0, 15))
+        self.json_section_info.pack(anchor=tk.W, pady=(0, 15))
 
         # Memories folder (local mode only — hidden by default)
         self.memories_section_label = ttk.Label(input_card, text="Memories Folder", style="Header.TLabel")
@@ -1033,6 +1047,25 @@ class SnapchatDownloaderGUI:
         self.memories_section_info = ttk.Label(
             input_card,
             text="Select the memories/ folder OR a parent directory (e.g. snapchat/) to process all exports in bulk",
+            style="Info.TLabel",
+        )
+
+        # Chat media folder (chat-media mode only — hidden by default)
+        self.chat_media_section_label = ttk.Label(input_card, text="Chat Media Folder", style="Header.TLabel")
+        self.chat_media_section_frame = ttk.Frame(input_card, style="Card.TFrame")
+
+        chat_media_entry = ttk.Entry(self.chat_media_section_frame, textvariable=self.chat_media_path,
+                                     font=("Segoe UI", 9), width=50)
+        chat_media_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 10))
+
+        chat_media_btn = ttk.Button(self.chat_media_section_frame, text="Browse...",
+                                    command=self.browse_chat_media, style="Secondary.TButton")
+        chat_media_btn.pack(side=tk.LEFT)
+
+        self.chat_media_section_info = ttk.Label(
+            input_card,
+            text="Select the chat_media/ folder from your export — timestamps and senders are "
+                 "matched automatically from the export's json/chat_history.json when present",
             style="Info.TLabel",
         )
 
@@ -1064,6 +1097,9 @@ class SnapchatDownloaderGUI:
         # Output directory selection
         output_label = ttk.Label(input_card, text="Output Directory", style="Header.TLabel")
         output_label.pack(anchor=tk.W, pady=(0, 8))
+        # Anchor for _on_mode_change: mode-specific sections pack before this
+        # so they appear above the output picker instead of at the card bottom.
+        self.output_section_label = output_label
         
         output_frame = ttk.Frame(input_card, style="Card.TFrame")
         output_frame.pack(fill=tk.X, pady=(0, 15))
@@ -1296,6 +1332,9 @@ class SnapchatDownloaderGUI:
         # Buttons
         button_frame = ttk.Frame(input_card, style="Card.TFrame")
         button_frame.pack(fill=tk.X)
+        # Anchor for _on_mode_change: download-only sections restore before
+        # this so they don't end up below the action buttons.
+        self._button_frame = button_frame
 
         self.download_btn = ttk.Button(button_frame, text="Start Download",
                                        command=self.start_download,
@@ -1362,35 +1401,55 @@ class SnapchatDownloaderGUI:
             self.reconvert_videos.set(False)  # Reset when hidden
     
     def _on_mode_change(self):
-        """Show/hide sections depending on download vs. local-files mode."""
-        if self.mode.get() == "local":
-            # Show memories folder + local-only options
-            self.memories_section_label.pack(anchor=tk.W, pady=(0, 8))
-            self.memories_section_frame.pack(fill=tk.X, pady=(0, 8))
-            self.memories_section_info.pack(anchor=tk.W, pady=(0, 8))
-            self.skip_existing_local_check.pack(anchor=tk.W, padx=(6, 0))
-            self.skip_existing_local_info.pack(anchor=tk.W, padx=(26, 0), pady=(2, 15))
+        """Show/hide sections depending on the selected mode."""
+        mode = self.mode.get()
+
+        # Hide all mode-specific sections first, then re-show what applies.
+        self.memories_section_label.pack_forget()
+        self.memories_section_frame.pack_forget()
+        self.memories_section_info.pack_forget()
+        self.chat_media_section_label.pack_forget()
+        self.chat_media_section_frame.pack_forget()
+        self.chat_media_section_info.pack_forget()
+        self.skip_existing_local_check.pack_forget()
+        self.skip_existing_local_info.pack_forget()
+        # self.stitch_segments_local_check.pack_forget()
+        # self.stitch_segments_local_info.pack_forget()
+        self.json_section_label.pack_forget()
+        self.json_section_frame.pack_forget()
+        self.json_section_info.pack_forget()
+        for widget, _ in self._download_only_widgets:
+            widget.pack_forget()
+
+        anchor = self.output_section_label
+        if mode == "local":
+            self.json_section_label.pack(anchor=tk.W, pady=(0, 8), before=anchor)
+            self.json_section_frame.pack(fill=tk.X, pady=(0, 15), before=anchor)
+            self.json_section_info.pack(anchor=tk.W, pady=(0, 15), before=anchor)
+            self.memories_section_label.pack(anchor=tk.W, pady=(0, 8), before=anchor)
+            self.memories_section_frame.pack(fill=tk.X, pady=(0, 8), before=anchor)
+            self.memories_section_info.pack(anchor=tk.W, pady=(0, 8), before=anchor)
+            self.skip_existing_local_check.pack(anchor=tk.W, padx=(6, 0), before=anchor)
+            self.skip_existing_local_info.pack(anchor=tk.W, padx=(26, 0), pady=(2, 15), before=anchor)
             # Multi-segment stitcher hidden until tested — see __init__ note.
-            # self.stitch_segments_local_check.pack(anchor=tk.W, padx=(6, 0))
-            # self.stitch_segments_local_info.pack(anchor=tk.W, padx=(26, 0), pady=(2, 15))
-            # Hide download-only sections
-            for widget, _ in self._download_only_widgets:
-                widget.pack_forget()
-            # Update button label
+            # self.stitch_segments_local_check.pack(anchor=tk.W, padx=(6, 0), before=anchor)
+            # self.stitch_segments_local_info.pack(anchor=tk.W, padx=(26, 0), pady=(2, 15), before=anchor)
             self.download_btn.config(text="Process Local Files")
+        elif mode == "chatmedia":
+            # No JSON file needed — chat/snap history JSON is auto-discovered
+            # from the export folder next to chat_media/.
+            self.chat_media_section_label.pack(anchor=tk.W, pady=(0, 8), before=anchor)
+            self.chat_media_section_frame.pack(fill=tk.X, pady=(0, 8), before=anchor)
+            self.chat_media_section_info.pack(anchor=tk.W, pady=(0, 8), before=anchor)
+            self.skip_existing_local_check.pack(anchor=tk.W, padx=(6, 0), before=anchor)
+            self.skip_existing_local_info.pack(anchor=tk.W, padx=(26, 0), pady=(2, 15), before=anchor)
+            self.download_btn.config(text="Process Chat Media")
         else:
-            # Hide memories folder + local-only options
-            self.memories_section_label.pack_forget()
-            self.memories_section_frame.pack_forget()
-            self.memories_section_info.pack_forget()
-            self.skip_existing_local_check.pack_forget()
-            self.skip_existing_local_info.pack_forget()
-            # self.stitch_segments_local_check.pack_forget()
-            # self.stitch_segments_local_info.pack_forget()
-            # Restore download-only sections
+            self.json_section_label.pack(anchor=tk.W, pady=(0, 8), before=anchor)
+            self.json_section_frame.pack(fill=tk.X, pady=(0, 15), before=anchor)
+            self.json_section_info.pack(anchor=tk.W, pady=(0, 15), before=anchor)
             for widget, pack_opts in self._download_only_widgets:
-                widget.pack(**pack_opts)
-            # Update button label
+                widget.pack(before=self._button_frame, **pack_opts)
             self.download_btn.config(text="Start Download")
 
     def browse_memories(self):
@@ -1417,6 +1476,42 @@ class SnapchatDownloaderGUI:
             self.memories_section_info.config(
                 text=f"✓ {len(folders)} memories folders found — {total:,} total files ready to process"
             )
+
+    def browse_chat_media(self):
+        """Open directory dialog to select a chat_media/ folder."""
+        directory = filedialog.askdirectory(
+            title="Select the chat_media/ folder from your Snapchat export"
+        )
+        if not directory:
+            return
+        # Accept the export root too — descend into chat_media/ if present.
+        direct = os.path.join(directory, "chat_media")
+        if os.path.isdir(direct):
+            directory = direct
+        self.chat_media_path.set(directory)
+
+        # Immediate feedback: file count + whether chat history JSON was found
+        try:
+            scan = chat_media_utils.scan_chat_media(directory)
+            n_standalone = len(scan["standalone"])
+            n_zip = sum(len(k.get("media", [])) for k in scan["zip_by_date"].values())
+            json_dir = chat_media_utils.find_export_json_dir(directory)
+            if n_standalone + n_zip == 0:
+                self.chat_media_section_info.config(
+                    text="⚠ No chat media files found — select the chat_media/ folder from your export"
+                )
+            elif json_dir:
+                self.chat_media_section_info.config(
+                    text=f"✓ {n_standalone + n_zip:,} media files found — chat history JSON "
+                         f"detected (exact timestamps + senders available)"
+                )
+            else:
+                self.chat_media_section_info.config(
+                    text=f"✓ {n_standalone + n_zip:,} media files found — no json/chat_history.json "
+                         f"nearby, will fall back to filename dates"
+                )
+        except Exception:
+            pass
 
     def browse_json(self):
         """Open file dialog to select JSON file."""
@@ -1518,27 +1613,40 @@ class SnapchatDownloaderGUI:
 
         json_file = self.json_path.get()
         output_dir = self.output_path.get()
+        mode = self.mode.get()
 
-        if not json_file:
-            messagebox.showerror("Error", "Please select a JSON file")
-            return
+        # Chat-media mode discovers its JSON automatically; the other modes
+        # require memories_history.json.
+        if mode != "chatmedia":
+            if not json_file:
+                messagebox.showerror("Error", "Please select a JSON file")
+                return
 
-        if not os.path.exists(json_file):
-            messagebox.showerror("Error", f"JSON file not found: {json_file}")
-            return
+            if not os.path.exists(json_file):
+                messagebox.showerror("Error", f"JSON file not found: {json_file}")
+                return
 
         if not output_dir:
             messagebox.showerror("Error", "Please select an output directory")
             return
 
         # Local-files mode extra validation
-        if self.mode.get() == "local":
+        if mode == "local":
             memories_dir = self.memories_path.get()
             if not memories_dir:
                 messagebox.showerror("Error", "Please select the memories/ folder")
                 return
             if not os.path.isdir(memories_dir):
                 messagebox.showerror("Error", f"Memories folder not found: {memories_dir}")
+                return
+
+        if mode == "chatmedia":
+            chat_media_dir = self.chat_media_path.get()
+            if not chat_media_dir:
+                messagebox.showerror("Error", "Please select the chat_media/ folder")
+                return
+            if not os.path.isdir(chat_media_dir):
+                messagebox.showerror("Error", f"Chat media folder not found: {chat_media_dir}")
                 return
 
         # Clear log
@@ -1548,7 +1656,17 @@ class SnapchatDownloaderGUI:
         self.is_downloading = True
         self.stop_download = False
 
-        if self.mode.get() == "local":
+        if mode == "chatmedia":
+            self.is_local_mode = True
+            self.download_btn.config(state=tk.DISABLED, text="⚙ Processing...")
+            self.status_label.config(text="🔄 Starting chat media processing...", foreground="#00d2d3")
+            self.stop_btn.config(state=tk.NORMAL)
+            self.progress_bar['value'] = 0
+            thread = threading.Thread(
+                target=self.process_chat_media_thread,
+                args=(self.chat_media_path.get(), output_dir),
+            )
+        elif self.mode.get() == "local":
             self.is_local_mode = True
             self.download_btn.config(state=tk.DISABLED, text="⚙ Processing...")
             self.status_label.config(text="🔄 Starting local processing...", foreground="#00d2d3")
@@ -2377,7 +2495,9 @@ class SnapchatDownloaderGUI:
         """Reset UI after download or local-processing completes."""
         self.is_downloading = False
         if self.is_local_mode:
-            self.download_btn.config(state=tk.NORMAL, text="Process Local Files")
+            btn_text = ("Process Chat Media" if self.mode.get() == "chatmedia"
+                        else "Process Local Files")
+            self.download_btn.config(state=tk.NORMAL, text=btn_text)
             if self.stop_download:
                 self.status_label.config(text="⚠ Processing stopped", foreground="#f39c12")
             else:
@@ -2852,6 +2972,219 @@ class SnapchatDownloaderGUI:
             messagebox.showerror("Error", f"An error occurred:\n{exc}")
         finally:
             self.download_complete()
+
+    def process_chat_media_thread(self, chat_media_dir, output_dir):
+        """Merge captions and fix metadata for a chat_media export folder."""
+        try:
+            output_path = Path(output_dir)
+            output_path.mkdir(exist_ok=True)
+
+            self.log(f"Scanning chat media folder: {chat_media_dir}")
+            scan = chat_media_utils.scan_chat_media(chat_media_dir)
+            standalone = scan["standalone"]
+            zip_by_date = scan["zip_by_date"]
+            n_zip_media = sum(len(k.get("media", [])) for k in zip_by_date.values())
+            n_overlays = sum(len(k.get("overlay", [])) for k in zip_by_date.values())
+            total = len(standalone) + n_zip_media
+
+            self.log(f"Found {len(standalone):,} direct chat media files, "
+                     f"{n_zip_media:,} snap bundles ({n_overlays:,} caption overlays)")
+            if scan["unreadable"]:
+                self.log(f"⚠ {len(scan['unreadable'])} file(s) are in an unreadable format "
+                         f"and will be skipped:")
+                for r in scan["unreadable"]:
+                    self.log(f"    • {r['fname']}")
+            if scan["unrecognized"]:
+                self.log(f"ℹ {len(scan['unrecognized'])} file(s) with unrecognized names "
+                         f"will be skipped")
+            if total == 0:
+                self.log("⚠ No processable chat media found")
+                self.download_complete()
+                return
+
+            # Chat/snap history gives exact timestamps + senders when present
+            json_dir = chat_media_utils.find_export_json_dir(chat_media_dir)
+            if json_dir:
+                self.log(f"✓ Found export JSON folder: {json_dir}")
+            else:
+                self.log("ℹ No json/chat_history.json found near the chat_media folder — "
+                         "falling back to embedded video timestamps and filename dates")
+            index = chat_media_utils.build_chat_index(json_dir)
+
+            direct, via_snap = chat_media_utils.match_standalone(standalone, index)
+            claimed = chat_media_utils.collect_claimed_ids(standalone)
+            zip_matched = chat_media_utils.match_zip_groups(zip_by_date, index, claimed)
+            if index is not None:
+                self.log(f"🔗 Matched to chat history: {direct:,} direct, "
+                         f"{via_snap:,} via snap history, {zip_matched:,} snap bundles")
+            self.log(f"🖼 Overlay mode: {self.overlay_mode.get()}")
+            self.log("🌍 Timezone: system (chat media has no GPS data)")
+            self.log("")
+
+            idx = 0
+            success = 0
+            skipped = 0
+            errors = 0
+
+            # Direct sends first (no overlays possible)
+            for record in standalone:
+                if self.stop_download:
+                    break
+                idx += 1
+                logs, ok, was_skipped = self._process_chat_media_item(
+                    idx, total, record, None, output_path)
+                for line in logs:
+                    self.log(line)
+                if was_skipped:
+                    skipped += 1
+                elif ok:
+                    success += 1
+                else:
+                    errors += 1
+                self.update_progress(idx, total)
+
+            # Snap bundles: pair captions with their media per date
+            unmatched_overlays = []
+            for day in sorted(zip_by_date):
+                if self.stop_download:
+                    break
+                kinds = zip_by_date[day]
+                pair_logs = []
+                pairs, leftover = chat_media_utils.pair_overlays(
+                    kinds, log_fn=pair_logs.append)
+                unmatched_overlays.extend(leftover)
+
+                sidecars = kinds.get("metadata", [])
+                publisher = None
+                for sc in sidecars:
+                    meta = chat_media_utils.parse_metadata_sidecar(sc["path"])
+                    if meta and meta.get("publisher_formal_name"):
+                        publisher = meta["publisher_formal_name"]
+
+                first_of_day = True
+                for media_record, overlay_record in pairs:
+                    if self.stop_download:
+                        break
+                    idx += 1
+                    logs, ok, was_skipped = self._process_chat_media_item(
+                        idx, total, media_record, overlay_record, output_path)
+                    if first_of_day:
+                        logs[1:1] = ["  " + line.strip() for line in pair_logs]
+                        if publisher:
+                            logs.insert(1, f"  📰 Publisher content: {publisher}")
+                        first_of_day = False
+                    for line in logs:
+                        self.log(line)
+                    if was_skipped:
+                        skipped += 1
+                    elif ok:
+                        success += 1
+                    else:
+                        errors += 1
+                    self.update_progress(idx, total)
+
+            if self.stop_download:
+                self.log("\n⚠ Stopped by user")
+
+            # Preserve captions we could not attach to any media
+            if unmatched_overlays and not self.stop_download:
+                unmatched_dir = output_path / "unmatched_overlays"
+                unmatched_dir.mkdir(exist_ok=True)
+                for ov in unmatched_overlays:
+                    try:
+                        shutil.copy2(ov["path"], unmatched_dir / ov["fname"])
+                    except Exception:
+                        pass
+                self.log(f"\nℹ {len(unmatched_overlays)} caption overlay(s) could not be "
+                         f"paired to media — copied to {unmatched_dir}")
+
+            self.log("")
+            self.log("━" * 40)
+            self.log(f"✓ Processed: {success:,}   ⏭ Skipped: {skipped:,}   ✗ Errors: {errors:,}")
+            self.log(f"Output: {output_path}")
+
+        except Exception as exc:
+            self.log(f"✗ Chat media processing failed: {exc}")
+            logging.error(f"process_chat_media_thread: {exc}", exc_info=True)
+        finally:
+            self.download_complete()
+
+    def _process_chat_media_item(self, idx, total, record, overlay_record, output_path):
+        """Process one chat media file: name by capture time, merge overlay,
+        write metadata. Returns (log_lines, ok, was_skipped)."""
+        logs = [f"[{idx}/{total}] {record['fname']}"]
+
+        def log_local(msg):
+            logs.append(msg)
+
+        try:
+            is_video = record["is_video"]
+            ext = record["ext"]
+
+            date_obj_utc, source = chat_media_utils.resolve_timestamp(record)
+            log_local(f"  🕒 {date_obj_utc.strftime('%Y-%m-%d %H:%M:%S')} UTC ({source})")
+
+            match = record.get("match")
+            if match is not None:
+                sender = match.get("From", "?")
+                conversation = match.get("_conversation") or ""
+                if conversation and conversation != sender:
+                    log_local(f"  💬 From {sender} in \"{conversation}\"")
+                else:
+                    log_local(f"  💬 From {sender}")
+
+            # Chat media never has GPS — always use the system timezone.
+            try:
+                local_dt, tz_name, tz_off_str = snap_utils.convert_to_local_timezone(
+                    date_obj_utc, None, None, force_system_tz=True
+                )
+            except Exception:
+                local_dt = date_obj_utc
+                tz_off_str = "+00:00"
+
+            date_str = local_dt.strftime("%Y%m%d_%H%M%S")
+            overlay_mode = self.overlay_mode.get()
+            out_name = f"{date_str}_{idx}{ext}"
+            out_file = str(output_path / out_name)
+
+            if self.skip_existing_local.get() and os.path.exists(out_file):
+                log_local(f"  ⏭ Already exists → {out_name}")
+                return logs, True, True
+
+            overlay_path = overlay_record["path"] if overlay_record else None
+
+            if overlay_path and overlay_mode in ("merge", "both"):
+                if is_video:
+                    ok, result = merge_video_overlay(record["path"], overlay_path, out_file)
+                else:
+                    ok, result = merge_images(record["path"], overlay_path, out_file)
+
+                if ok:
+                    log_local(f"  ✓ Merged caption → {out_name}")
+                    _apply_file_metadata(out_file, is_video, local_dt, None, None,
+                                         tz_off_str, log_local)
+                else:
+                    log_local(f"  ⚠ Merge failed ({result}), copying original instead")
+                    _copy_file_with_metadata(record["path"], out_file, is_video, local_dt,
+                                             None, None, tz_off_str, log_local)
+
+                if overlay_mode == "both":
+                    orig_name = f"{date_str}_{idx}_original{ext}"
+                    orig_out = str(output_path / orig_name)
+                    _copy_file_with_metadata(record["path"], orig_out, is_video, local_dt,
+                                             None, None, tz_off_str, log_local)
+                    log_local(f"  ✓ Saved original → {orig_name}")
+            else:
+                _copy_file_with_metadata(record["path"], out_file, is_video, local_dt,
+                                         None, None, tz_off_str, log_local)
+                log_local(f"  ✓ → {out_name}")
+
+            return logs, True, False
+
+        except Exception as exc:
+            logs.append(f"  ✗ Error: {exc}")
+            logging.error(f"_process_chat_media_item {record['fname']}: {exc}", exc_info=True)
+            return logs, False, False
 
     def _process_local_file(self, idx, total, fname, file_path, overlay_path,
                              json_entry, utc_mtime, output_path):

@@ -213,3 +213,5 @@ memories_history.json
 example/**
 test files/*
 .idea/
+
+chat_media_test/*

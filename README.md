@@ -38,6 +38,7 @@ This tool downloads all your Snapchat memories using the `memories_history.json`
 - **Progress Tracking** — Real-time progress updates and detailed logging
 - **Stop/Resume** — Pause and resume downloads at any time
 - **Process Local Files** — Apply metadata to already-downloaded memories when Snapchat export does not include download URLs
+- **Process Chat Media** — Merge captions and fix dates/timestamps for the `chat_media/` folder in your export, with senders and exact times matched from your chat history
 
 ## 🚀 Getting Started
 
@@ -176,6 +177,54 @@ Once you have the files, Snapchat still includes the actual media inside the `me
 The app matches each local file to its JSON entry using the file's modification timestamp, which Snapchat preserves in the export. Correct dates, GPS coordinates, and timezone information are then embedded into each output file.
 
 > **Note:** If you have multiple export ZIPs (Snapchat splits large exports across several files), place all extracted folders inside one parent directory and point the app at that parent. It will process all of them in a single run.
+
+## 💬 Processing Chat Media (Merge Captions + Fix Metadata)
+
+Snapchat exports can also include a `chat_media/` folder — every photo and video saved in your chats (direct sends, saved snaps, and camera-roll shares). These files come with scrambled names, no usable timestamps, and captions stored as **separate transparent overlay images**. This mode reassembles them: captions are merged back onto their photos/videos, and correct dates, times, and file timestamps are written to every file.
+
+### Requesting the right export from Snapchat
+
+When you request your data at [accounts.snapchat.com](https://accounts.snapchat.com) → **My Data**, enable these toggles under "Select data to include":
+
+- **Export JSON Files** — required for exact timestamps and sender matching
+- **Chat History** — contains the message records your media files are matched against
+- **Export Chat Media** — the actual photos/videos from your chats
+- **Export Shared Stories** — recommended, catches media shared via stories
+
+![Toggles to select for a chat media export](images/toggles_for_chat_media_export.png)
+
+Then choose your date range and download/extract the export ZIP as usual. The extracted folder should contain both `chat_media/` and `json/` side by side:
+
+```
+mydata~XXX/
+├── chat_media/       ← the media files
+├── json/
+│   ├── chat_history.json    ← used for exact timestamps + senders
+│   └── snap_history.json
+└── html/
+```
+
+### How to use
+
+1. At the top of the app, switch the **Mode** to **Process Chat Media**
+2. **Chat Media Folder** — select the `chat_media/` folder from your extracted export (selecting the export folder itself also works). The app confirms how many files it found and whether it detected your chat history JSON
+3. **Output Directory** — choose where to save the processed files
+4. Pick an **overlay mode**: merged captions only, originals only, or both
+5. Click **Process Chat Media**
+
+### What the app does
+
+- **Exact timestamps** — files are matched to your `chat_history.json` / `snap_history.json` records (typically 98%+ match rate), falling back to the video's embedded creation time, then the filename date
+- **Sender info** — the log shows who sent each file and in which conversation
+- **Caption merging** — `media~` and `overlay~` files from the same snap are paired and merged. When several snaps share a date, the app verifies pairings against the export's thumbnails; captions that can't be confidently paired are never merged onto the wrong photo — they're preserved in an `unmatched_overlays/` folder instead
+- **Metadata fixing** — EXIF dates (images), embedded creation dates (videos), and file created/modified timestamps are all set to the real capture time, so files sort correctly in your photo library
+- Output files are named by capture time: `YYYYMMDD_HHMMSS_<n>.jpg` / `.mp4`
+
+> **Notes:**
+> - Chat media contains **no GPS data** (unlike memories), so timestamps use your system timezone and no location is embedded.
+> - Thumbnails and metadata sidecar files from the export are consumed during processing but not copied to the output — they contain no unique media.
+> - A few files in some exports are stored in an unreadable (likely encrypted) format; these are listed in the log and skipped.
+> - If the `json/` folder is missing, the mode still works — it just falls back to embedded video timestamps and filename dates.
 
 ## 🔧 Technical Details
 
