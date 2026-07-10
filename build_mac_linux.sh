@@ -7,6 +7,11 @@ set -e
 echo "Building Snapchat Memories Downloader..."
 pyinstaller --clean SnapchatMemoriesDownloader.spec
 echo
-echo "Build complete! Check the dist folder:"
-echo "  macOS: dist/SnapchatMemoriesDownloader.app"
-echo "  Linux: dist/SnapchatMemoriesDownloader"
+echo "Build complete! Check the dist folder."
+# PyInstaller builds for the OS it runs on — it cannot cross-compile.
+case "$(uname -s)" in
+    Darwin) echo "  macOS build: dist/SnapchatMemoriesDownloader.app" ;;
+    Linux)  echo "  Linux build: dist/SnapchatMemoriesDownloader" ;;
+    *)      echo "  Note: built for THIS platform only. To get the macOS .app or"
+            echo "  Linux binary, build on that OS or use the GitHub Actions workflow." ;;
+esac

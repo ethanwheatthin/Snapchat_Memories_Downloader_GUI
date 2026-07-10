@@ -240,7 +240,7 @@ pip install pyinstaller
 build_exe.bat
 
 # macOS / Linux
-sh build.sh
+sh build_mac_linux.sh
 ```
 The output is created in the `dist` folder: `SnapchatMemoriesDownloader.exe` on Windows, `SnapchatMemoriesDownloader.app` on macOS, and a `SnapchatMemoriesDownloader` binary on Linux. The build is driven by `SnapchatMemoriesDownloader.spec`, which includes the necessary hidden imports for all dependencies. PyInstaller does not cross-compile — build on the OS you are targeting. The GitHub Actions workflow in `.github/workflows/build.yml` builds all three automatically on version tags.
 
