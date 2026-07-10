@@ -1,5 +1,9 @@
 name: Build
 
+# Needed so the release-attach step can create/update GitHub releases
+permissions:
+  contents: write
+
 on:
   workflow_dispatch:
   push:
