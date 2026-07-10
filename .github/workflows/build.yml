@@ -1,0 +1,68 @@
+name: Build
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            artifact_name: SnapchatMemoriesDownloader-windows
+            artifact_path: dist/SnapchatMemoriesDownloader.exe
+          - os: macos-latest
+            artifact_name: SnapchatMemoriesDownloader-macos
+            artifact_path: dist/SnapchatMemoriesDownloader-macos.zip
+          - os: ubuntu-latest
+            artifact_name: SnapchatMemoriesDownloader-linux
+            artifact_path: dist/SnapchatMemoriesDownloader-linux.tar.gz
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # Tk shared libraries needed so the bundled tkinter can load
+      - name: Install Tk (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-tk
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+
+      - name: Build
+        run: pyinstaller --clean SnapchatMemoriesDownloader.spec
+
+      # Zip/tar the Mac and Linux outputs so executable permissions survive
+      # artifact upload (upload-artifact does not preserve the exec bit).
+      - name: Package (macOS)
+        if: runner.os == 'macOS'
+        run: ditto -c -k --keepParent dist/SnapchatMemoriesDownloader.app dist/SnapchatMemoriesDownloader-macos.zip
+
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
+        run: tar -czf dist/SnapchatMemoriesDownloader-linux.tar.gz -C dist SnapchatMemoriesDownloader
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: ${{ matrix.artifact_path }}
+          if-no-files-found: error
+
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ matrix.artifact_path }}

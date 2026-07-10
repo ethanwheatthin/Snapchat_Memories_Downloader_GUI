@@ -1,6 +1,6 @@
 # Snapchat Memories Downloader GUI
 
-A user-friendly Windows desktop application to download and preserve your Snapchat memories with their original metadata, including dates and location information.
+A user-friendly desktop application (Windows, macOS, and Linux) to download and preserve your Snapchat memories with their original metadata, including dates and location information.
 
 ![Application Interface](images/application_screen.png)
 
@@ -212,6 +212,22 @@ Core libraries:
 - **VLC Media Player** — Automatic video conversion to H.264 (highly recommended)
 - **FFmpeg** — Enhanced video overlay processing
 
+## 🍎🐧 Running on macOS and Linux (ALPHA NEEDS TESTERS)
+
+The app runs on macOS and Linux as well as Windows. Grab the platform build from the [releases page](https://github.com/ethanwheatthin/Snapchat_Memories_Downloader_GUI/releases) if one is published, or run from source (see below).
+
+**macOS notes:**
+- If you use the pre-built `.app`, macOS Gatekeeper will warn about an unsigned app the first time. Right-click the app → **Open** → **Open** to run it.
+- If running from source, use Python from [python.org](https://www.python.org/downloads/) or Homebrew (`brew install python-tk`) — the Tk that ships with the old system Python is buggy.
+- Install [VLC](https://www.videolan.org/) and/or FFmpeg (`brew install ffmpeg`) for video conversion and overlay merging.
+
+**Linux notes:**
+- Tkinter is not bundled with most distro Pythons. Install it first:
+  - Debian/Ubuntu: `sudo apt install python3-tk`
+  - Fedora: `sudo dnf install python3-tkinter`
+  - Arch: `sudo pacman -S tk`
+- Install VLC and FFmpeg from your package manager (e.g. `sudo apt install vlc ffmpeg`) for video conversion and overlay merging.
+
 ## ⚙️ Building from Source
 
 To compile the executable yourself:
@@ -220,10 +236,13 @@ To compile the executable yourself:
 # Install PyInstaller
 pip install pyinstaller
 
-# Use the provided build script
+# Windows
 build_exe.bat
+
+# macOS / Linux
+sh build.sh
 ```
-The executable will be created in the `dist` folder. The build script includes necessary hidden imports for all dependencies.
+The output is created in the `dist` folder: `SnapchatMemoriesDownloader.exe` on Windows, `SnapchatMemoriesDownloader.app` on macOS, and a `SnapchatMemoriesDownloader` binary on Linux. The build is driven by `SnapchatMemoriesDownloader.spec`, which includes the necessary hidden imports for all dependencies. PyInstaller does not cross-compile — build on the OS you are targeting. The GitHub Actions workflow in `.github/workflows/build.yml` builds all three automatically on version tags.
 
 ### Running from Source
 
@@ -272,7 +291,7 @@ python -m pytest tests/ -v --tb=short
 - **Storage Space** — Ensure sufficient disk space for all memories
 - **URL Expiration** — Download links expire over time; process your data export promptly
 - **Privacy** — All processing happens locally on your computer; no data is sent elsewhere
-- **Windows Only** — This application is designed specifically for Windows
+- **Cross-Platform** — Runs on Windows, macOS, and Linux (see the macOS/Linux section above for setup notes)
 
 ## 💡 Tips
 

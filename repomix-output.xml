@@ -44,8 +44,10 @@ The content is organized as follows:
 .gitattributes
 .github/copilot-instructions.md
 .github/workflows/build-and-release.yml
+.github/workflows/build.yml
 .gitignore
 build_exe.bat
+build.sh
 CHANGES_SUMMARY.md
 DEBUGGING.md
 download_snapchat_memories_gui.py
@@ -78,12 +80,99 @@ zip_utils.py
 <files>
 This section contains the contents of the repository's files.
 
+<file path=".github/workflows/build.yml">
+name: Build
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            artifact_name: SnapchatMemoriesDownloader-windows
+            artifact_path: dist/SnapchatMemoriesDownloader.exe
+          - os: macos-latest
+            artifact_name: SnapchatMemoriesDownloader-macos
+            artifact_path: dist/SnapchatMemoriesDownloader-macos.zip
+          - os: ubuntu-latest
+            artifact_name: SnapchatMemoriesDownloader-linux
+            artifact_path: dist/SnapchatMemoriesDownloader-linux.tar.gz
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # Tk shared libraries needed so the bundled tkinter can load
+      - name: Install Tk (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-tk
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+
+      - name: Build
+        run: pyinstaller --clean SnapchatMemoriesDownloader.spec
+
+      # Zip/tar the Mac and Linux outputs so executable permissions survive
+      # artifact upload (upload-artifact does not preserve the exec bit).
+      - name: Package (macOS)
+        if: runner.os == 'macOS'
+        run: ditto -c -k --keepParent dist/SnapchatMemoriesDownloader.app dist/SnapchatMemoriesDownloader-macos.zip
+
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
+        run: tar -czf dist/SnapchatMemoriesDownloader-linux.tar.gz -C dist SnapchatMemoriesDownloader
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: ${{ matrix.artifact_path }}
+          if-no-files-found: error
+
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ matrix.artifact_path }}
+</file>
+
+<file path="build.sh">
+#!/usr/bin/env sh
+# macOS/Linux counterpart to build_exe.bat. Single source of truth for the
+# release build is SnapchatMemoriesDownloader.spec (issue #45); any future
+# tweaks belong in the .spec, not in flags here.
+set -e
+
+echo "Building Snapchat Memories Downloader..."
+pyinstaller --clean SnapchatMemoriesDownloader.spec
+echo
+echo "Build complete! Check the dist folder:"
+echo "  macOS: dist/SnapchatMemoriesDownloader.app"
+echo "  Linux: dist/SnapchatMemoriesDownloader"
+</file>
+
 <file path=".claude/settings.local.json">
 {
   "permissions": {
     "allow": [
       "Bash(gh issue *)",
-      "Bash(gh api *)"
+      "Bash(gh api *)",
+      "PowerShell(.venv\\\\Scripts\\\\python.exe -m pytest tests/ -q --tb=short 2>$null)"
     ]
   }
 }
@@ -2139,10 +2228,23 @@ def check_vlc():
 
 
 def find_vlc_executable():
-    vlc_paths = [
-        r"C:\Program Files\VideoLAN\VLC\vlc.exe",
-        r"C:\Program Files (x86)\VideoLAN\VLC\vlc.exe",
-    ]
+    if sys.platform == 'win32':
+        vlc_paths = [
+            r"C:\Program Files\VideoLAN\VLC\vlc.exe",
+            r"C:\Program Files (x86)\VideoLAN\VLC\vlc.exe",
+        ]
+    elif sys.platform == 'darwin':
+        vlc_paths = [
+            "/Applications/VLC.app/Contents/MacOS/VLC",
+            os.path.expanduser("~/Applications/VLC.app/Contents/MacOS/VLC"),
+        ]
+    else:
+        vlc_paths = [
+            "/usr/bin/vlc",
+            "/usr/local/bin/vlc",
+            "/snap/bin/vlc",
+            "/var/lib/flatpak/exports/bin/org.videolan.VLC",
+        ]
     vlc_in_path = shutil.which('vlc')
     if vlc_in_path:
         return vlc_in_path
@@ -3695,7 +3797,7 @@ def process_zip_overlay(zip_path, output_dir, date_obj=None):
 <file path="README.md">
 # Snapchat Memories Downloader GUI
 
-A user-friendly Windows desktop application to download and preserve your Snapchat memories with their original metadata, including dates and location information.
+A user-friendly desktop application (Windows, macOS, and Linux) to download and preserve your Snapchat memories with their original metadata, including dates and location information.
 
 ![Application Interface](images/application_screen.png)
 
@@ -3742,26 +3844,16 @@ This tool downloads all your Snapchat memories using the `memories_history.json`
 2. **Install optional tools** for best results:
    - **VLC Media Player** ([download](https://www.videolan.org/)) — enables video conversion to H.264
    - **FFmpeg** ([download](https://www.ffmpeg.org/download.html)) — enhances video overlay merging
-3. **Run the application** — Double-click the `.exe` file (no installation needed)
-4. Follow the usage instructions below
+3. **RESTART YOUR COMPUTER AFTER INSTALLING VLC AND FFMPEG**
+4. **Run the application** — Double-click the `.exe` file ('Run anyway' if you get a windows security warning)
+5. Follow the usage instructions below
+   >  **Note:** If you keep getting the "no download URL found, skipping" message. Please refer to the [Local Processing Guide](https://github.com/ethanwheatthin/Snapchat_Memories_Downloader_GUI#-processing-local-files-no-download-urls). It takes some setup but has been reported as the most realiable if the memories_histpry.json method is not working for you. 
 
-### Running from Source
-
-For developers or advanced users:
-
-```bash
-# Clone the repository
-git clone https://github.com/ethanwheatthin/Snapchat_Memories_Downloader_GUI.git
-cd Snapchat_Memories_Downloader_GUI
-
-# Install dependencies
-pip install -r requirements.txt
-
-# Run the application
-python download_snapchat_memories_gui.py
-```
+   
 
 ## 📥 How to Get Your Snapchat Data
+
+> **Note:** Snapchat exports expire after 7 days. It is advised to move quickly when you get access to your full export from snapchat. If you get errors it's best to just request a new batch and reproces that.
 
 1. Open **Snapchat** on your mobile device
 2. Tap your **profile icon** (top-left) → **⚙️ Settings** (top-right)
@@ -3912,10 +4004,26 @@ Core libraries:
 
 > **Note:** The application gracefully handles missing optional packages. If timezone libraries aren't installed, timestamps default to UTC. If EXIF/video metadata libraries are missing, files are still downloaded but without embedded metadata.
 
-### Optional Tools
+### REQUIRED Tools
 
 - **VLC Media Player** — Automatic video conversion to H.264 (highly recommended)
 - **FFmpeg** — Enhanced video overlay processing
+
+## 🍎🐧 Running on macOS and Linux
+
+The app runs on macOS and Linux as well as Windows. Grab the platform build from the [releases page](https://github.com/ethanwheatthin/Snapchat_Memories_Downloader_GUI/releases) if one is published, or run from source (see below).
+
+**macOS notes:**
+- If you use the pre-built `.app`, macOS Gatekeeper will warn about an unsigned app the first time. Right-click the app → **Open** → **Open** to run it.
+- If running from source, use Python from [python.org](https://www.python.org/downloads/) or Homebrew (`brew install python-tk`) — the Tk that ships with the old system Python is buggy.
+- Install [VLC](https://www.videolan.org/) and/or FFmpeg (`brew install ffmpeg`) for video conversion and overlay merging.
+
+**Linux notes:**
+- Tkinter is not bundled with most distro Pythons. Install it first:
+  - Debian/Ubuntu: `sudo apt install python3-tk`
+  - Fedora: `sudo dnf install python3-tkinter`
+  - Arch: `sudo pacman -S tk`
+- Install VLC and FFmpeg from your package manager (e.g. `sudo apt install vlc ffmpeg`) for video conversion and overlay merging.
 
 ## ⚙️ Building from Source
 
@@ -3925,11 +4033,29 @@ To compile the executable yourself:
 # Install PyInstaller
 pip install pyinstaller
 
-# Use the provided build script
+# Windows
 build_exe.bat
-```
 
-The executable will be created in the `dist` folder. The build script includes necessary hidden imports for all dependencies.
+# macOS / Linux
+sh build.sh
+```
+The output is created in the `dist` folder: `SnapchatMemoriesDownloader.exe` on Windows, `SnapchatMemoriesDownloader.app` on macOS, and a `SnapchatMemoriesDownloader` binary on Linux. The build is driven by `SnapchatMemoriesDownloader.spec`, which includes the necessary hidden imports for all dependencies. PyInstaller does not cross-compile — build on the OS you are targeting. The GitHub Actions workflow in `.github/workflows/build.yml` builds all three automatically on version tags.
+
+### Running from Source
+
+For developers or advanced users:
+
+```bash
+# Clone the repository
+git clone https://github.com/ethanwheatthin/Snapchat_Memories_Downloader_GUI.git
+cd Snapchat_Memories_Downloader_GUI
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Run the application
+python download_snapchat_memories_gui.py
+```
 
 ## 🧪 Testing
 
@@ -3959,11 +4085,10 @@ python -m pytest tests/ -v --tb=short
 
 ## 📝 Important Notes
 
-- **Internet Required** — Active connection needed to download from Snapchat servers
 - **Storage Space** — Ensure sufficient disk space for all memories
 - **URL Expiration** — Download links expire over time; process your data export promptly
 - **Privacy** — All processing happens locally on your computer; no data is sent elsewhere
-- **Windows Only** — This application is designed specifically for Windows
+- **Cross-Platform** — Runs on Windows, macOS, and Linux (see the macOS/Linux section above for setup notes)
 
 ## 💡 Tips
 
@@ -4066,12 +4191,30 @@ try:
 except (ImportError, FileNotFoundError, OSError):
     HAS_VLC = False
 
+def get_app_base_dir():
+    """Base directory for default output and the debug log.
+
+    Launched from a terminal, the current working directory is used so files
+    land where the user ran the app. A double-clicked macOS .app (and some
+    Linux launchers) starts with cwd at '/' or another unwritable location,
+    so fall back to the user's home directory in that case.
+    """
+    cwd = Path.cwd()
+    if cwd != Path(cwd.anchor) and os.access(cwd, os.W_OK):
+        return cwd
+    return Path.home()
+
+
+APP_BASE_DIR = get_app_base_dir()
+LOG_FILE = str(APP_BASE_DIR / "debug.log")
+DEFAULT_OUTPUT_DIR = str(APP_BASE_DIR / "downloads")
+
 # Configure logging
 logging.basicConfig(
     level=logging.DEBUG,  # Set to DEBUG for verbose logging
     format='%(asctime)s [%(levelname)s] %(message)s',
     handlers=[
-        logging.FileHandler("debug.log"),  # Log to a file
+        logging.FileHandler(LOG_FILE),  # Log to a file
         logging.StreamHandler()  # Log to console
     ]
 )
@@ -4775,17 +4918,30 @@ class ScrollableFrame(ttk.Frame):
         # Make inner window width match canvas width
         self.canvas.bind("<Configure>", lambda e: self.canvas.itemconfigure(self._window, width=e.width))
 
-        # Mouse wheel support (Windows / macOS typical behavior)
+        # Mouse wheel support. Windows reports delta in multiples of 120,
+        # macOS in small step values (±1..±10), and Linux/X11 doesn't send
+        # <MouseWheel> at all — it sends Button-4/Button-5 instead.
         def _on_mousewheel(event):
             try:
-                delta = int(-1 * (event.delta / 120))
+                if sys.platform == 'darwin':
+                    delta = -1 * int(event.delta)
+                else:
+                    delta = int(-1 * (event.delta / 120))
             except Exception:
                 delta = 0
             if delta:
                 self.canvas.yview_scroll(delta, "units")
 
+        def _on_button4(event):
+            self.canvas.yview_scroll(-1, "units")
+
+        def _on_button5(event):
+            self.canvas.yview_scroll(1, "units")
+
         # Bind mousewheel to the canvas
         self.canvas.bind_all("<MouseWheel>", _on_mousewheel)
+        self.canvas.bind_all("<Button-4>", _on_button4)
+        self.canvas.bind_all("<Button-5>", _on_button5)
 
 class SnapchatDownloaderGUI:
     def __init__(self, root):
@@ -4797,7 +4953,7 @@ class SnapchatDownloaderGUI:
         
         # Variables
         self.json_path = tk.StringVar()
-        self.output_path = tk.StringVar(value="downloads")
+        self.output_path = tk.StringVar(value=DEFAULT_OUTPUT_DIR)
         # Conversion is automatic when tools are available; no checkbox in UI
         self.max_retries = tk.IntVar(value=3)  # Number of download attempts (initial + retries)
         default_threads = 3
@@ -5412,7 +5568,7 @@ class SnapchatDownloaderGUI:
 
     def open_output_dir(self):
         """Open the currently selected output directory in the system file manager."""
-        path = self.output_path.get() or "downloads"
+        path = self.output_path.get() or DEFAULT_OUTPUT_DIR
         if not os.path.exists(path):
             messagebox.showwarning("Folder not found", f"Directory not found: {path}")
             return
@@ -5428,7 +5584,7 @@ class SnapchatDownloaderGUI:
     
     def open_debug_log(self):
         """Open the debug.log file with the default text editor."""
-        log_path = "debug.log"
+        log_path = LOG_FILE
         if not os.path.exists(log_path):
             messagebox.showinfo("Log Not Found", "debug.log doesn't exist yet. It will be created when you start a download.")
             return
@@ -5576,7 +5732,7 @@ class SnapchatDownloaderGUI:
         # Get output directory
         output_dir = self.output_path.get()
         if not output_dir:
-            output_dir = "downloads"
+            output_dir = DEFAULT_OUTPUT_DIR
         
         # Clear log and show processing message
         self.log_text.delete(1.0, tk.END)

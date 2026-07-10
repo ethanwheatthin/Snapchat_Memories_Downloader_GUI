@@ -2,7 +2,8 @@
   "permissions": {
     "allow": [
       "Bash(gh issue *)",
-      "Bash(gh api *)"
+      "Bash(gh api *)",
+      "PowerShell(.venv\\\\Scripts\\\\python.exe -m pytest tests/ -q --tb=short 2>$null)"
     ]
   }
 }

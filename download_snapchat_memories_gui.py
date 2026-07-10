@@ -58,12 +58,30 @@ try:
 except (ImportError, FileNotFoundError, OSError):
     HAS_VLC = False
 
+def get_app_base_dir():
+    """Base directory for default output and the debug log.
+
+    Launched from a terminal, the current working directory is used so files
+    land where the user ran the app. A double-clicked macOS .app (and some
+    Linux launchers) starts with cwd at '/' or another unwritable location,
+    so fall back to the user's home directory in that case.
+    """
+    cwd = Path.cwd()
+    if cwd != Path(cwd.anchor) and os.access(cwd, os.W_OK):
+        return cwd
+    return Path.home()
+
+
+APP_BASE_DIR = get_app_base_dir()
+LOG_FILE = str(APP_BASE_DIR / "debug.log")
+DEFAULT_OUTPUT_DIR = str(APP_BASE_DIR / "downloads")
+
 # Configure logging
 logging.basicConfig(
     level=logging.DEBUG,  # Set to DEBUG for verbose logging
     format='%(asctime)s [%(levelname)s] %(message)s',
     handlers=[
-        logging.FileHandler("debug.log"),  # Log to a file
+        logging.FileHandler(LOG_FILE),  # Log to a file
         logging.StreamHandler()  # Log to console
     ]
 )
@@ -767,17 +785,30 @@ class ScrollableFrame(ttk.Frame):
         # Make inner window width match canvas width
         self.canvas.bind("<Configure>", lambda e: self.canvas.itemconfigure(self._window, width=e.width))
 
-        # Mouse wheel support (Windows / macOS typical behavior)
+        # Mouse wheel support. Windows reports delta in multiples of 120,
+        # macOS in small step values (±1..±10), and Linux/X11 doesn't send
+        # <MouseWheel> at all — it sends Button-4/Button-5 instead.
         def _on_mousewheel(event):
             try:
-                delta = int(-1 * (event.delta / 120))
+                if sys.platform == 'darwin':
+                    delta = -1 * int(event.delta)
+                else:
+                    delta = int(-1 * (event.delta / 120))
             except Exception:
                 delta = 0
             if delta:
                 self.canvas.yview_scroll(delta, "units")
 
+        def _on_button4(event):
+            self.canvas.yview_scroll(-1, "units")
+
+        def _on_button5(event):
+            self.canvas.yview_scroll(1, "units")
+
         # Bind mousewheel to the canvas
         self.canvas.bind_all("<MouseWheel>", _on_mousewheel)
+        self.canvas.bind_all("<Button-4>", _on_button4)
+        self.canvas.bind_all("<Button-5>", _on_button5)
 
 class SnapchatDownloaderGUI:
     def __init__(self, root):
@@ -789,7 +820,7 @@ class SnapchatDownloaderGUI:
         
         # Variables
         self.json_path = tk.StringVar()
-        self.output_path = tk.StringVar(value="downloads")
+        self.output_path = tk.StringVar(value=DEFAULT_OUTPUT_DIR)
         # Conversion is automatic when tools are available; no checkbox in UI
         self.max_retries = tk.IntVar(value=3)  # Number of download attempts (initial + retries)
         default_threads = 3
@@ -1404,7 +1435,7 @@ class SnapchatDownloaderGUI:
 
     def open_output_dir(self):
         """Open the currently selected output directory in the system file manager."""
-        path = self.output_path.get() or "downloads"
+        path = self.output_path.get() or DEFAULT_OUTPUT_DIR
         if not os.path.exists(path):
             messagebox.showwarning("Folder not found", f"Directory not found: {path}")
             return
@@ -1420,7 +1451,7 @@ class SnapchatDownloaderGUI:
     
     def open_debug_log(self):
         """Open the debug.log file with the default text editor."""
-        log_path = "debug.log"
+        log_path = LOG_FILE
         if not os.path.exists(log_path):
             messagebox.showinfo("Log Not Found", "debug.log doesn't exist yet. It will be created when you start a download.")
             return
@@ -1568,7 +1599,7 @@ class SnapchatDownloaderGUI:
         # Get output directory
         output_dir = self.output_path.get()
         if not output_dir:
-            output_dir = "downloads"
+            output_dir = DEFAULT_OUTPUT_DIR
         
         # Clear log and show processing message
         self.log_text.delete(1.0, tk.END)

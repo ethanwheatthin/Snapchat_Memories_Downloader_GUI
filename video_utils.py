@@ -143,10 +143,23 @@ def check_vlc():
 
 
 def find_vlc_executable():
-    vlc_paths = [
-        r"C:\Program Files\VideoLAN\VLC\vlc.exe",
-        r"C:\Program Files (x86)\VideoLAN\VLC\vlc.exe",
-    ]
+    if sys.platform == 'win32':
+        vlc_paths = [
+            r"C:\Program Files\VideoLAN\VLC\vlc.exe",
+            r"C:\Program Files (x86)\VideoLAN\VLC\vlc.exe",
+        ]
+    elif sys.platform == 'darwin':
+        vlc_paths = [
+            "/Applications/VLC.app/Contents/MacOS/VLC",
+            os.path.expanduser("~/Applications/VLC.app/Contents/MacOS/VLC"),
+        ]
+    else:
+        vlc_paths = [
+            "/usr/bin/vlc",
+            "/usr/local/bin/vlc",
+            "/snap/bin/vlc",
+            "/var/lib/flatpak/exports/bin/org.videolan.VLC",
+        ]
     vlc_in_path = shutil.which('vlc')
     if vlc_in_path:
         return vlc_in_path
