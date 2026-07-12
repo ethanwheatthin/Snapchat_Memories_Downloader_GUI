@@ -1,4 +1,4 @@
-# Snapchat Memories Downloader GUI
+# Snapchat Memories & Chat Media Download GUI
 
 A user-friendly desktop application (Windows, macOS, and Linux) to download and preserve your Snapchat memories with their original metadata, including dates and location information.
 
