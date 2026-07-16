@@ -75,6 +75,7 @@ def get_app_base_dir():
 APP_BASE_DIR = get_app_base_dir()
 LOG_FILE = str(APP_BASE_DIR / "debug.log")
 DEFAULT_OUTPUT_DIR = str(APP_BASE_DIR / "downloads")
+SETTINGS_FILE = str(APP_BASE_DIR / "gui_settings.json")
 
 # Configure logging
 logging.basicConfig(
@@ -91,6 +92,8 @@ logging.basicConfig(
 # --- Delegated to refactored utility module ---
 import snap_utils, exif_utils, video_utils, zip_utils, downloader
 import chat_media_utils
+from wizard_ui import (ScrollableFrame, WizardController,
+                       TaskStep, SourceStep, OptionsStep, RunStep)
 
 # Windows-specific subprocess flag to prevent command windows from popping up
 CREATE_NO_WINDOW = 0x08000000 if sys.platform == 'win32' else 0
@@ -763,54 +766,6 @@ def get_file_extension(media_type):
     return snap_utils.get_file_extension(media_type)
 
 
-class ScrollableFrame(ttk.Frame):
-    """A scrollable frame that allows vertical scrolling of its content."""
-    def __init__(self, container, *args, **kwargs):
-        super().__init__(container)
-        # Canvas for scrolling
-        self.canvas = tk.Canvas(self, borderwidth=0, highlightthickness=0)
-        self.v_scrollbar = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
-        self.canvas.configure(yscrollcommand=self.v_scrollbar.set)
-
-        # Pack canvas and scrollbar
-        self.canvas.pack(side="left", fill="both", expand=True)
-        self.v_scrollbar.pack(side="right", fill="y")
-
-        # Inner frame where widgets should be placed
-        self.frame = ttk.Frame(self.canvas, *args, **kwargs)
-        self._window = self.canvas.create_window((0, 0), window=self.frame, anchor="nw")
-
-        # Update scrollregion when inner frame changes size
-        self.frame.bind("<Configure>", lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
-
-        # Make inner window width match canvas width
-        self.canvas.bind("<Configure>", lambda e: self.canvas.itemconfigure(self._window, width=e.width))
-
-        # Mouse wheel support. Windows reports delta in multiples of 120,
-        # macOS in small step values (±1..±10), and Linux/X11 doesn't send
-        # <MouseWheel> at all — it sends Button-4/Button-5 instead.
-        def _on_mousewheel(event):
-            try:
-                if sys.platform == 'darwin':
-                    delta = -1 * int(event.delta)
-                else:
-                    delta = int(-1 * (event.delta / 120))
-            except Exception:
-                delta = 0
-            if delta:
-                self.canvas.yview_scroll(delta, "units")
-
-        def _on_button4(event):
-            self.canvas.yview_scroll(-1, "units")
-
-        def _on_button5(event):
-            self.canvas.yview_scroll(1, "units")
-
-        # Bind mousewheel to the canvas
-        self.canvas.bind_all("<MouseWheel>", _on_mousewheel)
-        self.canvas.bind_all("<Button-4>", _on_button4)
-        self.canvas.bind_all("<Button-5>", _on_button5)
-
 class SnapchatDownloaderGUI:
     def __init__(self, root):
         self.root = root
@@ -837,20 +792,32 @@ class SnapchatDownloaderGUI:
 
         # Mode: "download" = normal download from URLs, "local" = process
         # already-downloaded local files, "chatmedia" = merge captions and fix
-        # metadata for a chat_media export folder
+        # metadata for a chat_media export folder. The wizard derives this
+        # from the task choice + whether the export JSON contains URLs.
         self.mode = tk.StringVar(value="download")
         self.memories_path = tk.StringVar()
         self.chat_media_path = tk.StringVar()
         self.is_local_mode = False  # Tracks which mode is active during processing
         self.skip_existing_local = tk.BooleanVar(value=False)
         # Multi-segment video stitcher is disabled until we've tested it
-        # against real exports; flip default back to True + uncomment the
-        # checkbox in create_widgets() / _on_mode_change to re-enable.
+        # against real exports; flip default back to True + re-add a
+        # checkbox in wizard_ui.OptionsStep to re-enable.
         self.stitch_segments_local = tk.BooleanVar(value=False)
-        
+
+        self.skip_existing = tk.BooleanVar(value=False)
+        self.reconvert_videos = tk.BooleanVar(value=False)
+
+        # Wizard routing: which task card was picked ("memories"/"chatmedia")
+        # and, for memories, which method ("download" via JSON URLs or
+        # "local" processing of already-downloaded files).
+        self.task_choice = tk.StringVar(value="memories")
+        self.memories_method = tk.StringVar(value="download")
+
+        self._load_settings()
+
         # Configure style
         self.setup_styles()
-        
+
         # Build UI
         self.create_widgets()
         
@@ -883,6 +850,16 @@ class SnapchatDownloaderGUI:
         # Card and main frame styles
         style.configure("Main.TFrame", background=bg_color)
         style.configure("Card.TFrame", background=card_bg, relief="flat", borderwidth=1)
+
+        # Wizard header (sits on the page background, not a card)
+        style.configure("AppTitle.TLabel", background=bg_color, foreground=text_color,
+                        font=("Segoe UI", 15, "bold"))
+        style.configure("AppSubtitle.TLabel", background=bg_color, foreground=muted_color,
+                        font=("Segoe UI", 9))
+        style.configure("PageHeader.TLabel", background=bg_color, foreground=text_color,
+                        font=("Segoe UI", 12, "bold"))
+        style.configure("PageInfo.TLabel", background=bg_color, foreground=muted_color,
+                        font=("Segoe UI", 9))
 
         # Label styles
         style.configure("Title.TLabel", background=card_bg, foreground=text_color,
@@ -939,518 +916,69 @@ class SnapchatDownloaderGUI:
         self.root.geometry(f'{width}x{height}+{x}+{y}')
     
     def create_widgets(self):
-        """Create and layout all widgets."""
-        # Main container (scrollable)
-        scroll_container = ScrollableFrame(self.root, style="Main.TFrame", padding=20)
-        scroll_container.pack(fill=tk.BOTH, expand=True)
-        main_frame = scroll_container.frame
-        
-        # Header card
-        header_card = ttk.Frame(main_frame, style="Card.TFrame", padding=20)
-        header_card.pack(fill=tk.X, pady=(0, 20))
-        
-        title_label = ttk.Label(header_card, text="Snapchat Memories Downloader", 
-                               style="Title.TLabel")
-        title_label.pack(anchor=tk.W)
-        
-        subtitle_label = ttk.Label(header_card, 
-                                   text="Download your Snapchat memories with metadata preservation", 
-                                   style="Subtitle.TLabel")
-        subtitle_label.pack(anchor=tk.W, pady=(5, 0))
-        
-        # Input card
-        input_card = ttk.Frame(main_frame, style="Card.TFrame", padding=20)
-        input_card.pack(fill=tk.X, pady=(0, 20))
-        
-        # Mode selector
-        mode_header = ttk.Label(input_card, text="Mode", style="Header.TLabel")
-        mode_header.pack(anchor=tk.W, pady=(0, 8))
+        """Build the step-based wizard UI."""
+        container = ttk.Frame(self.root, style="Main.TFrame", padding=(24, 18, 24, 18))
+        container.pack(fill=tk.BOTH, expand=True)
 
-        mode_frame = ttk.Frame(input_card, style="Card.TFrame")
-        mode_frame.pack(fill=tk.X, pady=(0, 4))
+        header = ttk.Frame(container, style="Main.TFrame")
+        header.pack(fill=tk.X, pady=(0, 12))
+        ttk.Label(header, text="Snapchat Memories Downloader",
+                  style="AppTitle.TLabel").pack(side=tk.LEFT)
+        ttk.Label(header, text="with metadata preservation",
+                  style="AppSubtitle.TLabel").pack(side=tk.LEFT, padx=(10, 0), pady=(5, 0))
 
-        mode_rb_download = ttk.Radiobutton(
-            mode_frame,
-            text="Download from Snapchat  —  fetch via memories_history.json URLs",
-            variable=self.mode,
-            value="download",
-            style="Card.TRadiobutton",
-            command=self._on_mode_change,
-        )
-        mode_rb_download.pack(anchor=tk.W)
+        self.wizard = WizardController(container, self)
+        self.wizard.pack(fill=tk.BOTH, expand=True)
+        for step_cls in (TaskStep, SourceStep, OptionsStep, RunStep):
+            self.wizard.add_step(step_cls)
+        self.wizard.start()
 
-        mode_rb_local = ttk.Radiobutton(
-            mode_frame,
-            text="Process Local Files  —  apply metadata to already-downloaded memories",
-            variable=self.mode,
-            value="local",
-            style="Card.TRadiobutton",
-            command=self._on_mode_change,
-        )
-        mode_rb_local.pack(anchor=tk.W, pady=(4, 0))
+    def _wizard_refresh(self):
+        """Refresh wizard nav state (Back button, step chips) if it exists."""
+        try:
+            self.wizard.refresh_nav()
+        except Exception:
+            pass
 
-        mode_rb_chatmedia = ttk.Radiobutton(
-            mode_frame,
-            text="Process Chat Media  —  merge captions and fix metadata for chat_media exports",
-            variable=self.mode,
-            value="chatmedia",
-            style="Card.TRadiobutton",
-            command=self._on_mode_change,
-        )
-        mode_rb_chatmedia.pack(anchor=tk.W, pady=(4, 0))
+    def _settings_vars(self):
+        # task_choice is deliberately not persisted — step 1 always starts
+        # on Memories.
+        return {
+            "memories_method": self.memories_method,
+            "json_path": self.json_path,
+            "memories_path": self.memories_path,
+            "chat_media_path": self.chat_media_path,
+            "output_path": self.output_path,
+            "overlay_mode": self.overlay_mode,
+            "max_retries": self.max_retries,
+            "max_threads": self.max_threads,
+            "use_gps_tz": self.use_gps_tz,
+            "skip_existing": self.skip_existing,
+            "reconvert_videos": self.reconvert_videos,
+            "skip_existing_local": self.skip_existing_local,
+        }
 
-        mode_info = ttk.Label(
-            input_card,
-            text="Use 'Process Local Files' when Snapchat didn't include download URLs in your export "
-                 "but you have the actual media files in the memories/ folder.",
-            style="Info.TLabel",
-            wraplength=520,
-            justify=tk.LEFT,
-        )
-        mode_info.pack(anchor=tk.W, pady=(2, 15))
-        input_card.bind("<Configure>", lambda e: mode_info.config(wraplength=max(e.width - 12, 200)))
+    def _load_settings(self):
+        """Restore last-used paths/options so repeat runs are click-through."""
+        try:
+            with open(SETTINGS_FILE, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+        except Exception:
+            return
+        for key, var in self._settings_vars().items():
+            if key in data:
+                try:
+                    var.set(data[key])
+                except Exception:
+                    pass
 
-        ttk.Separator(input_card, orient="horizontal").pack(fill=tk.X, pady=(0, 15))
-
-        # JSON file selection (hidden in chat-media mode — auto-discovered there)
-        self.json_section_label = ttk.Label(input_card, text="JSON File", style="Header.TLabel")
-        self.json_section_label.pack(anchor=tk.W, pady=(0, 8))
-
-        self.json_section_frame = ttk.Frame(input_card, style="Card.TFrame")
-        self.json_section_frame.pack(fill=tk.X, pady=(0, 15))
-
-        self.json_entry = ttk.Entry(self.json_section_frame, textvariable=self.json_path,
-                                    font=("Segoe UI", 9), width=50)
-        self.json_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 10))
-
-        json_btn = ttk.Button(self.json_section_frame, text="Browse...",
-                             command=self.browse_json, style="Secondary.TButton")
-        json_btn.pack(side=tk.LEFT)
-
-        self.json_section_info = ttk.Label(input_card,
-                             text="Select your memories_history.json file from Snapchat export",
-                             style="Info.TLabel")
-        self.json_section_info.pack(anchor=tk.W, pady=(0, 15))
-
-        # Memories folder (local mode only — hidden by default)
-        self.memories_section_label = ttk.Label(input_card, text="Memories Folder", style="Header.TLabel")
-        self.memories_section_frame = ttk.Frame(input_card, style="Card.TFrame")
-
-        memories_entry = ttk.Entry(self.memories_section_frame, textvariable=self.memories_path,
-                                   font=("Segoe UI", 9), width=50)
-        memories_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 10))
-
-        memories_btn = ttk.Button(self.memories_section_frame, text="Browse...",
-                                  command=self.browse_memories, style="Secondary.TButton")
-        memories_btn.pack(side=tk.LEFT)
-
-        self.memories_section_info = ttk.Label(
-            input_card,
-            text="Select the memories/ folder OR a parent directory (e.g. snapchat/) to process all exports in bulk",
-            style="Info.TLabel",
-        )
-
-        # Chat media folder (chat-media mode only — hidden by default)
-        self.chat_media_section_label = ttk.Label(input_card, text="Chat Media Folder", style="Header.TLabel")
-        self.chat_media_section_frame = ttk.Frame(input_card, style="Card.TFrame")
-
-        chat_media_entry = ttk.Entry(self.chat_media_section_frame, textvariable=self.chat_media_path,
-                                     font=("Segoe UI", 9), width=50)
-        chat_media_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 10))
-
-        chat_media_btn = ttk.Button(self.chat_media_section_frame, text="Browse...",
-                                    command=self.browse_chat_media, style="Secondary.TButton")
-        chat_media_btn.pack(side=tk.LEFT)
-
-        self.chat_media_section_info = ttk.Label(
-            input_card,
-            text="Select the chat_media/ folder from your export — timestamps and senders are "
-                 "matched automatically from the export's json/chat_history.json when present",
-            style="Info.TLabel",
-        )
-
-        # Skip existing files (local mode only)
-        self.skip_existing_local_check = ttk.Checkbutton(
-            input_card,
-            text="Skip already-processed files",
-            variable=self.skip_existing_local,
-            style="Card.TCheckbutton",
-        )
-        self.skip_existing_local_info = ttk.Label(
-            input_card,
-            text="Skip files that already exist in the output directory",
-            style="Info.TLabel",
-        )
-        self.stitch_segments_local_check = ttk.Checkbutton(
-            input_card,
-            text="Stitch multi-segment videos (>10s recordings)",
-            variable=self.stitch_segments_local,
-            style="Card.TCheckbutton",
-        )
-        self.stitch_segments_local_info = ttk.Label(
-            input_card,
-            text="Snapchat splits videos longer than 10 seconds — re-join the segments after processing",
-            style="Info.TLabel",
-        )
-        # hidden by default; revealed by _on_mode_change
-
-        # Output directory selection
-        output_label = ttk.Label(input_card, text="Output Directory", style="Header.TLabel")
-        output_label.pack(anchor=tk.W, pady=(0, 8))
-        # Anchor for _on_mode_change: mode-specific sections pack before this
-        # so they appear above the output picker instead of at the card bottom.
-        self.output_section_label = output_label
-        
-        output_frame = ttk.Frame(input_card, style="Card.TFrame")
-        output_frame.pack(fill=tk.X, pady=(0, 15))
-        
-        self.output_entry = ttk.Entry(output_frame, textvariable=self.output_path, 
-                                      font=("Segoe UI", 9), width=50)
-        self.output_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 10))
-        
-        output_btn = ttk.Button(output_frame, text="Browse...", 
-                       command=self.browse_output, style="Secondary.TButton")
-        output_btn.pack(side=tk.LEFT)
-
-        # Open output directory button (next to Browse)
-        open_out_btn = ttk.Button(output_frame, text="Open",
-                      command=self.open_output_dir, style="Secondary.TButton", width=8)
-        open_out_btn.pack(side=tk.LEFT, padx=(8, 0))
-        
-        # Open debug log button
-        open_log_btn = ttk.Button(output_frame, text="Open Log",
-                      command=self.open_debug_log, style="Secondary.TButton", width=10)
-        open_log_btn.pack(side=tk.LEFT, padx=(8, 0))
-        
-        output_info = ttk.Label(input_card, 
-                               text="Choose where to save your downloaded memories", 
-                               style="Info.TLabel")
-        output_info.pack(anchor=tk.W, pady=(0, 15))
-        
-        # Conversion tools status (ffmpeg / VLC) with install links if missing
-        tools_frame = ttk.Frame(input_card, style="Card.TFrame")
-        tools_frame.pack(fill=tk.X, pady=(0, 20))
-
-        tools_header = ttk.Label(tools_frame, text="Conversion Tools", style="Header.TLabel")
-        tools_header.pack(anchor=tk.W)
-
-        # ffmpeg status
-        ffmpeg_installed = check_ffmpeg()
-        ffmpeg_text = "✓ ffmpeg installed" if ffmpeg_installed else "⚠ ffmpeg not found — click to download"
-        ffmpeg_label = ttk.Label(tools_frame, text=ffmpeg_text, style="Info.TLabel", cursor=("hand2" if not ffmpeg_installed else "arrow"))
-        ffmpeg_label.pack(anchor=tk.W, padx=(6,0))
-        if not ffmpeg_installed:
-            ffmpeg_label.bind("<Button-1>", lambda e: webbrowser.open("https://ffmpeg.org/download.html"))
-
-        # VLC status
-        vlc_path = find_vlc_executable()
-        vlc_installed = bool(vlc_path or HAS_VLC)
-        if vlc_installed and vlc_path:
-            vlc_text = f"✓ VLC installed ({vlc_path})"
-        elif HAS_VLC:
-            vlc_text = "✓ VLC Python bindings available"
-        else:
-            vlc_text = "⚠ VLC not found — click to download"
-        vlc_label = ttk.Label(tools_frame, text=vlc_text, style="Info.TLabel", cursor=("hand2" if not vlc_installed else "arrow"))
-        vlc_label.pack(anchor=tk.W, padx=(6,0))
-        if not vlc_installed:
-            vlc_label.bind("<Button-1>", lambda e: webbrowser.open("https://www.videolan.org/vlc/"))
-
-        info_label = ttk.Label(
-            tools_frame,
-            text=("Videos will be converted to H.264 automatically when tools are available. "
-                  "ffmpeg/VLC are also used to merge Snapchat captions back onto photos or videos; "
-                  "click the links to download."),
-            style="Info.TLabel",
-            wraplength=520,
-            justify=tk.LEFT
-        )
-        info_label.pack(anchor=tk.W, pady=(6, 0))
-        # Update wraplength dynamically so the text wraps with the frame width
-        tools_frame.bind("<Configure>", lambda e: info_label.config(wraplength=max(e.width - 12, 200)))
-
-        # Small action buttons to open the download pages for ffmpeg and VLC
-        download_buttons_frame = ttk.Frame(tools_frame, style="Card.TFrame")
-        download_buttons_frame.pack(anchor=tk.W, pady=(8, 0))
-
-        ffmpeg_btn_text = "Open ffmpeg" if ffmpeg_installed else "Download ffmpeg"
-        ffmpeg_btn = ttk.Button(download_buttons_frame, text=ffmpeg_btn_text, style="Secondary.TButton", width=18,
-                                command=lambda: webbrowser.open("https://ffmpeg.org/download.html"))
-        ffmpeg_btn.pack(side=tk.LEFT, padx=(6, 8))
-
-        vlc_btn_text = "Open VLC" if vlc_installed else "Download VLC"
-        vlc_btn = ttk.Button(download_buttons_frame, text=vlc_btn_text, style="Secondary.TButton", width=18,
-                             command=lambda: webbrowser.open("https://www.videolan.org/vlc/"))
-        vlc_btn.pack(side=tk.LEFT)
-        
-        # Download retries option  (hidden in local mode)
-        retries_frame = ttk.Frame(input_card, style="Card.TFrame")
-        self._download_only_widgets = []  # populated below
-        retries_frame.pack(fill=tk.X, pady=(8, 12))
-        self._download_only_widgets.append((retries_frame, {"fill": tk.X, "pady": (8, 12)}))
-
-        retries_label = ttk.Label(retries_frame, text="Download Retries:", style="Header.TLabel")
-        retries_label.pack(side=tk.LEFT)
-
-        # Use a Spinbox for retry count
-        retries_spin = tk.Spinbox(retries_frame, from_=1, to=10, width=5, textvariable=self.max_retries)
-        retries_spin.pack(side=tk.LEFT, padx=(8, 0))
-
-        retries_info = ttk.Label(input_card,
-                                 text="Number of download attempts (initial try + retries)",
-                                 style="Info.TLabel")
-        retries_info.pack(anchor=tk.W, pady=(6, 10))
-        self._download_only_widgets.append((retries_info, {"anchor": tk.W, "pady": (6, 10)}))
-
-        # Download threads option
-        threads_frame = ttk.Frame(input_card, style="Card.TFrame")
-        threads_frame.pack(fill=tk.X, pady=(0, 12))
-        self._download_only_widgets.append((threads_frame, {"fill": tk.X, "pady": (0, 12)}))
-
-        threads_label = ttk.Label(threads_frame, text="Multi-Download Count:", style="Header.TLabel")
-        threads_label.pack(side=tk.LEFT)
-
-        threads_spin = tk.Spinbox(threads_frame, from_=1, to=16, width=5, textvariable=self.max_threads)
-        threads_spin.pack(side=tk.LEFT, padx=(8, 0))
-
-        threads_info = ttk.Label(input_card,
-                                 text="Number of concurrent downloads (higher uses more bandwidth/CPU)",
-                                 style="Info.TLabel")
-        threads_info.pack(anchor=tk.W, pady=(6, 10))
-        self._download_only_widgets.append((threads_info, {"anchor": tk.W, "pady": (6, 10)}))
-
-        # Resume Options Section
-        resume_header = ttk.Label(input_card, text="Resume Options", style="Header.TLabel")
-        resume_header.pack(anchor=tk.W, pady=(15, 8))
-        self._download_only_widgets.append((resume_header, {"anchor": tk.W, "pady": (15, 8)}))
-        
-        # Skip existing files checkbox
-        self.skip_existing = tk.BooleanVar(value=False)
-        skip_check = ttk.Checkbutton(
-            input_card,
-            text="Skip existing files (resume mode)",
-            variable=self.skip_existing,
-            style="Card.TCheckbutton",
-            command=self._toggle_reconvert_visibility
-        )
-        skip_check.pack(anchor=tk.W, padx=(6, 0))
-        self._download_only_widgets.append((skip_check, {"anchor": tk.W, "padx": (6, 0)}))
-
-        skip_info = ttk.Label(
-            input_card,
-            text="Validates local files before downloading. Useful for resuming interrupted sessions or adding new memories.",
-            style="Info.TLabel"
-        )
-        skip_info.pack(anchor=tk.W, padx=(26, 0), pady=(2, 8))
-        self._download_only_widgets.append((skip_info, {"anchor": tk.W, "padx": (26, 0), "pady": (2, 8)}))
-
-        # Re-convert videos checkbox (hidden by default, shown when skip_existing is ON)
-        self.reconvert_frame = ttk.Frame(input_card, style="Card.TFrame")
-        # Don't pack yet - will be shown/hidden by _toggle_reconvert_visibility
-        
-        self.reconvert_videos = tk.BooleanVar(value=False)
-        reconvert_check = ttk.Checkbutton(
-            self.reconvert_frame,
-            text="Re-convert existing videos to H.264 if needed",
-            variable=self.reconvert_videos,
-            style="Card.TCheckbutton"
-        )
-        reconvert_check.pack(anchor=tk.W, padx=(20, 0))
-        
-        reconvert_info = ttk.Label(
-            self.reconvert_frame,
-            text="Checks codec of existing videos and re-converts non-H.264 videos for better compatibility",
-            style="Info.TLabel"
-        )
-        reconvert_info.pack(anchor=tk.W, padx=(46, 0), pady=(2, 8))
-
-        # Timezone options section
-        tz_header = ttk.Label(input_card, text="Timezone Handling", style="Header.TLabel")
-        tz_header.pack(anchor=tk.W, pady=(15, 8))
-
-        gps_tz_check = ttk.Checkbutton(
-            input_card,
-            text="Use GPS coordinates to determine local timezone (recommended)",
-            variable=self.use_gps_tz,
-            style="Card.TCheckbutton"
-        )
-        gps_tz_check.pack(anchor=tk.W, padx=(6, 0))
-
-        gps_tz_info = ttk.Label(
-            input_card,
-            text="Uses photo/video GPS location to detect local timezone. Files are named and timestamped with local time.\nWhen disabled or GPS unavailable, uses system timezone as fallback.",
-            style="Info.TLabel"
-        )
-        gps_tz_info.pack(anchor=tk.W, padx=(26, 0), pady=(2, 8))
-
-        # Overlay merge option — radio buttons for 3 modes
-        overlay_header = ttk.Label(input_card, text="Snap Overlay / Caption", style="Header.TLabel")
-        overlay_header.pack(anchor=tk.W, pady=(15, 8))
-
-        overlay_rb_merge = ttk.Radiobutton(
-            input_card,
-            text="With overlay only — merge captions/stickers onto media",
-            variable=self.overlay_mode,
-            value="merge",
-            style="Card.TRadiobutton"
-        )
-        overlay_rb_merge.pack(anchor=tk.W, padx=(6, 0))
-
-        overlay_rb_original = ttk.Radiobutton(
-            input_card,
-            text="Original only — save photo/video without overlay",
-            variable=self.overlay_mode,
-            value="original",
-            style="Card.TRadiobutton"
-        )
-        overlay_rb_original.pack(anchor=tk.W, padx=(6, 0), pady=(4, 0))
-
-        overlay_rb_both = ttk.Radiobutton(
-            input_card,
-            text="Both versions — save original AND overlay in the same folder",
-            variable=self.overlay_mode,
-            value="both",
-            style="Card.TRadiobutton"
-        )
-        overlay_rb_both.pack(anchor=tk.W, padx=(6, 0), pady=(4, 0))
-
-        overlay_info = ttk.Label(
-            input_card,
-            text="Controls how Snapchat captions and stickers are handled.\n"
-                 "'Both versions' saves the clean original and the overlay version side-by-side.",
-            style="Info.TLabel"
-        )
-        overlay_info.pack(anchor=tk.W, padx=(26, 0), pady=(2, 8))
-
-        # Check available conversion tools and display status
-        # conversion_status = self.get_conversion_status()
-        # conversion_info = ttk.Label(input_card,
-        #                            text=conversion_status,
-        #                            style="Info.TLabel")
-        # conversion_info.pack(anchor=tk.W, pady=(0, 20))
-        
-        # Buttons
-        button_frame = ttk.Frame(input_card, style="Card.TFrame")
-        button_frame.pack(fill=tk.X)
-        # Anchor for _on_mode_change: download-only sections restore before
-        # this so they don't end up below the action buttons.
-        self._button_frame = button_frame
-
-        self.download_btn = ttk.Button(button_frame, text="Start Download",
-                                       command=self.start_download,
-                                       style="Primary.TButton")
-        self.download_btn.pack(side=tk.LEFT, padx=(0, 10))
-
-        self.stop_btn = ttk.Button(button_frame, text="⏹ Stop",
-                                   command=self.stop_download_func,
-                                   style="Stop.TButton", state=tk.DISABLED)
-        self.stop_btn.pack(side=tk.LEFT, padx=(0, 10))
-        
-        # DEV TESTING: Test ZIP overlay button
-        # self.test_zip_btn = ttk.Button(button_frame, text="🧪 Test ZIP Overlay", 
-        #                                command=self.test_zip_overlay, 
-        #                                style="Secondary.TButton")
-        # self.test_zip_btn.pack(side=tk.LEFT)
-        
-        # Progress card
-        self.progress_card = ttk.Frame(main_frame, style="Card.TFrame", padding=20)
-        self.progress_card.pack(fill=tk.BOTH, expand=True, pady=(0, 20))
-        
-        progress_label = ttk.Label(self.progress_card, text="Download Progress", 
-                                   style="Header.TLabel")
-        progress_label.pack(anchor=tk.W, pady=(0, 15))
-        
-        # Progress bar
-        self.progress_bar = ttk.Progressbar(self.progress_card, 
-                                           style="Custom.Horizontal.TProgressbar",
-                                           mode='determinate')
-        self.progress_bar.pack(fill=tk.X, pady=(0, 10))
-        
-        # Status label
-        self.status_label = ttk.Label(self.progress_card, 
-                                     text="Ready to download", 
-                                     style="Status.TLabel")
-        self.status_label.pack(anchor=tk.W, pady=(0, 10))
-        
-        # Log area
-        log_frame = ttk.Frame(self.progress_card, style="Card.TFrame")
-        log_frame.pack(fill=tk.BOTH, expand=True)
-        
-        scrollbar = ttk.Scrollbar(log_frame)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        
-        # Allow the log area to resize with the window by not forcing a fixed height
-        self.log_text = tk.Text(log_frame, wrap=tk.WORD,
-                       font=("Consolas", 9), bg="#f8f9fa",
-                       fg="#2f3542", relief=tk.FLAT,
-                       yscrollcommand=scrollbar.set)
-        self.log_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        scrollbar.config(command=self.log_text.yview)
-    
-    def _toggle_reconvert_visibility(self):
-        """Show or hide the re-convert option based on skip_existing checkbox state."""
-        if self.skip_existing.get():
-            self.reconvert_frame.pack(anchor=tk.W, pady=(0, 8), after=self.reconvert_frame.master.winfo_children()[
-                list(self.reconvert_frame.master.winfo_children()).index(self.reconvert_frame) - 1
-                if self.reconvert_frame in self.reconvert_frame.master.winfo_children() else -1
-            ] if self.reconvert_frame.winfo_ismapped() else None)
-            # Simple approach: just pack it
-            self.reconvert_frame.pack(anchor=tk.W, pady=(0, 8))
-        else:
-            self.reconvert_frame.pack_forget()
-            self.reconvert_videos.set(False)  # Reset when hidden
-    
-    def _on_mode_change(self):
-        """Show/hide sections depending on the selected mode."""
-        mode = self.mode.get()
-
-        # Hide all mode-specific sections first, then re-show what applies.
-        self.memories_section_label.pack_forget()
-        self.memories_section_frame.pack_forget()
-        self.memories_section_info.pack_forget()
-        self.chat_media_section_label.pack_forget()
-        self.chat_media_section_frame.pack_forget()
-        self.chat_media_section_info.pack_forget()
-        self.skip_existing_local_check.pack_forget()
-        self.skip_existing_local_info.pack_forget()
-        # self.stitch_segments_local_check.pack_forget()
-        # self.stitch_segments_local_info.pack_forget()
-        self.json_section_label.pack_forget()
-        self.json_section_frame.pack_forget()
-        self.json_section_info.pack_forget()
-        for widget, _ in self._download_only_widgets:
-            widget.pack_forget()
-
-        anchor = self.output_section_label
-        if mode == "local":
-            self.json_section_label.pack(anchor=tk.W, pady=(0, 8), before=anchor)
-            self.json_section_frame.pack(fill=tk.X, pady=(0, 15), before=anchor)
-            self.json_section_info.pack(anchor=tk.W, pady=(0, 15), before=anchor)
-            self.memories_section_label.pack(anchor=tk.W, pady=(0, 8), before=anchor)
-            self.memories_section_frame.pack(fill=tk.X, pady=(0, 8), before=anchor)
-            self.memories_section_info.pack(anchor=tk.W, pady=(0, 8), before=anchor)
-            self.skip_existing_local_check.pack(anchor=tk.W, padx=(6, 0), before=anchor)
-            self.skip_existing_local_info.pack(anchor=tk.W, padx=(26, 0), pady=(2, 15), before=anchor)
-            # Multi-segment stitcher hidden until tested — see __init__ note.
-            # self.stitch_segments_local_check.pack(anchor=tk.W, padx=(6, 0), before=anchor)
-            # self.stitch_segments_local_info.pack(anchor=tk.W, padx=(26, 0), pady=(2, 15), before=anchor)
-            self.download_btn.config(text="Process Local Files")
-        elif mode == "chatmedia":
-            # No JSON file needed — chat/snap history JSON is auto-discovered
-            # from the export folder next to chat_media/.
-            self.chat_media_section_label.pack(anchor=tk.W, pady=(0, 8), before=anchor)
-            self.chat_media_section_frame.pack(fill=tk.X, pady=(0, 8), before=anchor)
-            self.chat_media_section_info.pack(anchor=tk.W, pady=(0, 8), before=anchor)
-            self.skip_existing_local_check.pack(anchor=tk.W, padx=(6, 0), before=anchor)
-            self.skip_existing_local_info.pack(anchor=tk.W, padx=(26, 0), pady=(2, 15), before=anchor)
-            self.download_btn.config(text="Process Chat Media")
-        else:
-            self.json_section_label.pack(anchor=tk.W, pady=(0, 8), before=anchor)
-            self.json_section_frame.pack(fill=tk.X, pady=(0, 15), before=anchor)
-            self.json_section_info.pack(anchor=tk.W, pady=(0, 15), before=anchor)
-            for widget, pack_opts in self._download_only_widgets:
-                widget.pack(before=self._button_frame, **pack_opts)
-            self.download_btn.config(text="Start Download")
+    def _save_settings(self):
+        try:
+            data = {key: var.get() for key, var in self._settings_vars().items()}
+            with open(SETTINGS_FILE, "w", encoding="utf-8") as fh:
+                json.dump(data, fh, indent=2)
+        except Exception:
+            pass
 
     def browse_memories(self):
         """Open directory dialog to select a memories/ folder or parent directory."""
@@ -1690,6 +1218,9 @@ class SnapchatDownloaderGUI:
 
         thread.daemon = True
         thread.start()
+
+        self._save_settings()
+        self._wizard_refresh()  # lock Back while running
     
     def stop_download_func(self):
         """Stop the download process."""
@@ -2509,6 +2040,7 @@ class SnapchatDownloaderGUI:
             else:
                 self.status_label.config(text="✅ Download complete", foreground="#27ae60")
         self.stop_btn.config(state=tk.DISABLED, text="⏹ Stop")
+        self._wizard_refresh()
     
     def cleanup_ffmpeg_processes(self):
         """Kill any orphaned ffmpeg processes."""
@@ -2529,6 +2061,8 @@ class SnapchatDownloaderGUI:
     
     def on_closing(self):
         """Handle application close event."""
+        self._save_settings()
+
         # Clean up any orphaned ffmpeg processes
         self.cleanup_ffmpeg_processes()
 

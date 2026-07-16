@@ -215,3 +215,5 @@ test files/*
 .idea/
 
 chat_media_test/*
+# App-generated files
+gui_settings.json
