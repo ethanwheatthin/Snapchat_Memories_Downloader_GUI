@@ -18,7 +18,10 @@ Timestamps come from, in priority order:
   1. json/chat_history.json — "Media IDs" match b~/hash filenames exactly
   2. json/snap_history.json — date + media-type ordinal pairing
   3. the media file's embedded creation_time (videos)
-  4. the filename date (midday UTC)
+  4. the file's modification time — Snapchat writes the real send time
+     into the export zip entries, so extracted files carry it (validated
+     against the filename date in case extraction discarded it)
+  5. the filename date (midday local time)
 """
 
 import json
@@ -252,7 +255,15 @@ def _msg_datetime(msg):
     micros = msg.get('Created(microseconds)')
     if micros:
         try:
-            return datetime.fromtimestamp(int(micros) / 1000.0, tz=timezone.utc)
+            # Despite the field name, exports have shipped both true
+            # microseconds (16 digits) and milliseconds (13 digits) —
+            # disambiguate by magnitude.
+            value = int(micros)
+            if value >= 10**14:
+                value /= 1_000_000
+            elif value >= 10**11:
+                value /= 1000
+            return datetime.fromtimestamp(value, tz=timezone.utc)
         except Exception:
             pass
     created = msg.get('Created')
@@ -300,7 +311,9 @@ def match_standalone(records, index):
         candidates = [s for s in index['snaps_by_date'].get(day, [])
                       if s.get('Media Type') == kind and id(s) not in claimed]
         if len(candidates) == len(recs):
-            for r, snap in zip(sorted(recs, key=lambda x: x['fname']), candidates):
+            for r in recs:
+                get_export_mtime(r)
+            for r, snap in zip(sorted(recs, key=_capture_sort_key), candidates):
                 r['match'] = snap
                 claimed.add(id(snap))
                 snap_matched += 1
@@ -341,26 +354,31 @@ def match_zip_groups(zip_by_date, index, claimed_ids=None):
         for r in media_records:
             r['match'] = None
             r['_ctime'] = get_video_creation_time(r['path']) if r['is_video'] else None
+            get_export_mtime(r)
 
         if len(pool) == len(media_records):
-            ordered = sorted(
-                media_records,
-                key=lambda r: (r['_ctime'] is None, r['_ctime'] or r['fname'], r['fname'])
-            )
+            ordered = sorted(media_records, key=_capture_sort_key)
             for r, msg in zip(ordered, pool):
                 r['match'] = msg
                 matched += 1
         else:
-            # Pool disagrees — still try to align each video's embedded
-            # creation_time with the closest message (within 10 minutes).
+            # Pool disagrees — still try to align each file's known capture
+            # time with the closest message (within 10 minutes).
             for r in media_records:
-                if r['_ctime'] is None or not pool:
+                probe = r['_ctime'] or r['_mtime']
+                if probe is None or not pool:
                     continue
-                best = min(pool, key=lambda m: abs((m['_dt'] - r['_ctime']).total_seconds()))
-                if abs((best['_dt'] - r['_ctime']).total_seconds()) <= 600:
+                best = min(pool, key=lambda m: abs((m['_dt'] - probe).total_seconds()))
+                if abs((best['_dt'] - probe).total_seconds()) <= 600:
                     r['match'] = best
                     matched += 1
     return matched
+
+
+def _capture_sort_key(record):
+    """Sort key ordering records by best-known capture time, then filename."""
+    dt = record.get('_ctime') or record.get('_mtime')
+    return (dt is None, dt or record['fname'], record['fname'])
 
 
 def collect_claimed_ids(standalone_records):
@@ -394,11 +412,38 @@ def get_video_creation_time(file_path):
         return None
 
 
+def get_export_mtime(record):
+    """The file's modification time as aware UTC datetime, or None.
+
+    Snapchat writes each file's real send time into the export zip entries,
+    which extraction preserves. Trusted only when it lands within two days
+    of the filename's date — an extractor that discarded zip times leaves
+    mtimes at extraction time, which must not be mistaken for a send time.
+    """
+    if '_mtime' in record:
+        return record['_mtime']
+    mtime = None
+    try:
+        raw = datetime.fromtimestamp(os.path.getmtime(record['path']),
+                                     tz=timezone.utc)
+        file_date = datetime.strptime(record['date'], '%Y-%m-%d').replace(
+            tzinfo=timezone.utc)
+        if abs((raw - file_date).total_seconds()) <= 2 * 86400:
+            mtime = raw
+    except Exception:
+        pass
+    record['_mtime'] = mtime
+    return mtime
+
+
 def resolve_timestamp(record):
     """Best available capture time (aware UTC) and its source label.
 
     Priority: matched history entry -> embedded video creation_time ->
-    filename date at 12:00 UTC.
+    export file mtime -> filename date at 12:00 local time (noon local
+    keeps the calendar date right everywhere and reads as a deliberate
+    date-only default, unlike noon UTC which showed up as e.g. 6:00 AM
+    for US users).
     """
     match = record.get('match')
     if match is not None and match.get('_dt') is not None:
@@ -412,8 +457,12 @@ def resolve_timestamp(record):
             record['_ctime'] = ctime
             return ctime, 'embedded creation_time'
 
+    mtime = get_export_mtime(record)
+    if mtime is not None:
+        return mtime, 'export file time'
+
     dt = datetime.strptime(record['date'], '%Y-%m-%d').replace(
-        hour=12, tzinfo=timezone.utc)
+        hour=12).astimezone().astimezone(timezone.utc)
     return dt, 'filename date'
 
 

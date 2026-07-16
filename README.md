@@ -214,7 +214,7 @@ mydata~XXX/
 
 ### What the app does
 
-- **Exact timestamps** — files are matched to your `chat_history.json` / `snap_history.json` records (typically 98%+ match rate), falling back to the video's embedded creation time, then the filename date
+- **Exact timestamps** — files are matched to your `chat_history.json` / `snap_history.json` records (typically 98%+ match rate), falling back to the video's embedded creation time, then the send time Snapchat stores in the export's file modification times, then the filename date at noon local time
 - **Sender info** — the log shows who sent each file and in which conversation
 - **Caption merging** — `media~` and `overlay~` files from the same snap are paired and merged. When several snaps share a date, the app verifies pairings against the export's thumbnails; captions that can't be confidently paired are never merged onto the wrong photo — they're preserved in an `unmatched_overlays/` folder instead
 - **Metadata fixing** — EXIF dates (images), embedded creation dates (videos), and file created/modified timestamps are all set to the real capture time, so files sort correctly in your photo library
