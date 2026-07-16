@@ -3008,7 +3008,8 @@ class SnapchatDownloaderGUI:
                 self.log(f"✓ Found export JSON folder: {json_dir}")
             else:
                 self.log("ℹ No json/chat_history.json found near the chat_media folder — "
-                         "falling back to embedded video timestamps and filename dates")
+                         "falling back to embedded video timestamps, the export's file "
+                         "times, then filename dates")
             index = chat_media_utils.build_chat_index(json_dir)
 
             direct, via_snap = chat_media_utils.match_standalone(standalone, index)
